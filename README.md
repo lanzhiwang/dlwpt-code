@@ -49,3 +49,14 @@ cofounded a US-based startup focused on infrastructure for data-defined software
 Thomas Viehmann is a machine learning and PyTorch specialty trainer and consultant based in Munich, Germany, and a PyTorch core developer. With a PhD in
 mathematics, he is not scared by theory, but he is thoroughly practical when applying
 it to computing challenges.
+
+```bash
+docker run -it --rm -p 10000:8888 \
+-v ~/work/code/py_code/dlwpt-code:/home/jovyan/work \
+jupyter/minimal-notebook:x86_64-python-3.7.12
+
+pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+find . -name "*.ipynb" -exec black {} \;
+
+```
