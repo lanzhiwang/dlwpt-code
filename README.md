@@ -53,10 +53,24 @@ it to computing challenges.
 ```bash
 docker run -it --rm -p 10000:8888 \
 -v ~/work/code/py_code/dlwpt-code:/home/jovyan/work \
-jupyter/minimal-notebook:x86_64-python-3.7.12
+jupyter/minimal-notebook:x86_64-python-3.8.13
+
+python -m venv .env
+
+source .env/bin/activate
 
 pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+conda install --yes --file requirements.txt
 
 find . -name "*.ipynb" -exec black {} \;
+find . -name "*checkpoints*"
+
+docker run -it --rm \
+-v ~/work/code/py_code/dlwpt-code:/work \
+-w /work \
+python:3.6.8-slim bash
+
+
+
 
 ```

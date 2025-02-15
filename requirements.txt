@@ -10,7 +10,7 @@
 #
 # Then use .venv/bin/python to run the various training scripts.
 
-black[jupyter]==23.3.0
+black[jupyter]
 
 blosc>=1.8.1,<2
 diskcache==4.1.0
