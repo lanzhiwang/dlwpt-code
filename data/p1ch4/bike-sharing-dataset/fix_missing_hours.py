@@ -2,7 +2,9 @@ import copy
 import csv
 
 # instant,dteday,season,yr,mnth,hr,holiday,weekday,workingday,weathersit,temp,atemp,hum,windspeed,casual,registered,cnt
-with open('hour.csv', newline='') as hour_file, open('hour-fixed.csv', 'w', newline='') as fixed_file:
+with open("hour.csv", newline="") as hour_file, open(
+    "hour-fixed.csv", "w", newline=""
+) as fixed_file:
     hour_csv = csv.reader(hour_file)
     fixed_csv = csv.writer(fixed_file)
 
@@ -10,7 +12,7 @@ with open('hour.csv', newline='') as hour_file, open('hour-fixed.csv', 'w', newl
     for this_row in hour_csv:
         if last_row is None:
             pass
-        elif last_row[0] == 'instant':
+        elif last_row[0] == "instant":
             pass
         else:
             last_hour = int(last_row[5])
@@ -22,7 +24,7 @@ with open('hour.csv', newline='') as hour_file, open('hour-fixed.csv', 'w', newl
             missing_row = copy.deepcopy(last_row)
             missing_row[-1] = 0
 
-            for missing_hour in range(last_hour+1, this_hour):
+            for missing_hour in range(last_hour + 1, this_hour):
                 if missing_hour == 24:
                     missing_row = copy.deepcopy(this_row)
                     missing_row[-1] = 0

@@ -15,7 +15,11 @@ from torch.optim import SGD, Adam
 from torch.utils.data import DataLoader
 
 from util.util import enumerateWithEstimate
-from p2ch13.dsets import Luna2dSegmentationDataset, TrainingLuna2dSegmentationDataset, getCt
+from p2ch13.dsets import (
+    Luna2dSegmentationDataset,
+    TrainingLuna2dSegmentationDataset,
+    getCt,
+)
 from util.logconf import logging
 from util.util import xyz2irc
 from p2ch13.model_seg import UNetWrapper, SegmentationAugmentation
@@ -26,11 +30,13 @@ log = logging.getLogger(__name__)
 # log.setLevel(logging.INFO)
 log.setLevel(logging.DEBUG)
 
+
 class BenchmarkLuna2dSegmentationDataset(TrainingLuna2dSegmentationDataset):
     def __len__(self):
         # return 500
         return 5000
         return 1000
+
 
 class LunaBenchmarkApp(LunaTrainingApp):
     def initTrainDl(self):
@@ -60,17 +66,19 @@ class LunaBenchmarkApp(LunaTrainingApp):
         train_dl = self.initTrainDl()
 
         for epoch_ndx in range(1, 2):
-            log.info("Epoch {} of {}, {}/{} batches of size {}*{}".format(
-                epoch_ndx,
-                self.cli_args.epochs,
-                len(train_dl),
-                len([]),
-                self.cli_args.batch_size,
-                (torch.cuda.device_count() if self.use_cuda else 1),
-            ))
+            log.info(
+                "Epoch {} of {}, {}/{} batches of size {}*{}".format(
+                    epoch_ndx,
+                    self.cli_args.epochs,
+                    len(train_dl),
+                    len([]),
+                    self.cli_args.batch_size,
+                    (torch.cuda.device_count() if self.use_cuda else 1),
+                )
+            )
 
             self.doTraining(epoch_ndx, train_dl)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     LunaBenchmarkApp().main()

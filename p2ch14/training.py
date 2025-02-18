@@ -28,11 +28,12 @@ log.setLevel(logging.INFO)
 log.setLevel(logging.DEBUG)
 
 # Used for computeBatchLoss and logMetrics to index into metrics_t/metrics_a
-METRICS_LABEL_NDX=0
-METRICS_PRED_NDX=1
-METRICS_PRED_P_NDX=2
-METRICS_LOSS_NDX=3
+METRICS_LABEL_NDX = 0
+METRICS_PRED_NDX = 1
+METRICS_PRED_P_NDX = 2
+METRICS_LOSS_NDX = 3
 METRICS_SIZE = 4
+
 
 class ClassificationTrainingApp:
     def __init__(self, sys_argv=None):
@@ -40,57 +41,67 @@ class ClassificationTrainingApp:
             sys_argv = sys.argv[1:]
 
         parser = argparse.ArgumentParser()
-        parser.add_argument('--batch-size',
-            help='Batch size to use for training',
+        parser.add_argument(
+            "--batch-size",
+            help="Batch size to use for training",
             default=24,
             type=int,
         )
-        parser.add_argument('--num-workers',
-            help='Number of worker processes for background data loading',
+        parser.add_argument(
+            "--num-workers",
+            help="Number of worker processes for background data loading",
             default=8,
             type=int,
         )
-        parser.add_argument('--epochs',
-            help='Number of epochs to train for',
+        parser.add_argument(
+            "--epochs",
+            help="Number of epochs to train for",
             default=1,
             type=int,
         )
-        parser.add_argument('--dataset',
+        parser.add_argument(
+            "--dataset",
             help="What to dataset to feed the model.",
-            action='store',
-            default='LunaDataset',
+            action="store",
+            default="LunaDataset",
         )
-        parser.add_argument('--model',
+        parser.add_argument(
+            "--model",
             help="What to model class name to use.",
-            action='store',
-            default='LunaModel',
+            action="store",
+            default="LunaModel",
         )
-        parser.add_argument('--malignant',
+        parser.add_argument(
+            "--malignant",
             help="Train the model to classify nodules as benign or malignant.",
-            action='store_true',
+            action="store_true",
             default=False,
         )
-        parser.add_argument('--finetune',
+        parser.add_argument(
+            "--finetune",
             help="Start finetuning from this model.",
-            default='',
+            default="",
         )
-        parser.add_argument('--finetune-depth',
+        parser.add_argument(
+            "--finetune-depth",
             help="Number of blocks (counted from the head) to include in finetuning",
             type=int,
             default=1,
         )
-        parser.add_argument('--tb-prefix',
-            default='p2ch14',
+        parser.add_argument(
+            "--tb-prefix",
+            default="p2ch14",
             help="Data prefix to use for Tensorboard run. Defaults to chapter.",
         )
-        parser.add_argument('comment',
+        parser.add_argument(
+            "comment",
             help="Comment suffix for Tensorboard run.",
-            nargs='?',
-            default='dlwpt',
+            nargs="?",
+            default="dlwpt",
         )
 
         self.cli_args = parser.parse_args(sys_argv)
-        self.time_str = datetime.datetime.now().strftime('%Y-%m-%d_%H.%M.%S')
+        self.time_str = datetime.datetime.now().strftime("%Y-%m-%d_%H.%M.%S")
 
         self.trn_writer = None
         self.val_writer = None
@@ -98,16 +109,16 @@ class ClassificationTrainingApp:
 
         self.augmentation_dict = {}
         if True:
-        # if self.cli_args.augmented or self.cli_args.augment_flip:
-            self.augmentation_dict['flip'] = True
-        # if self.cli_args.augmented or self.cli_args.augment_offset:
-            self.augmentation_dict['offset'] = 0.1
-        # if self.cli_args.augmented or self.cli_args.augment_scale:
-            self.augmentation_dict['scale'] = 0.2
-        # if self.cli_args.augmented or self.cli_args.augment_rotate:
-            self.augmentation_dict['rotate'] = True
-        # if self.cli_args.augmented or self.cli_args.augment_noise:
-            self.augmentation_dict['noise'] = 25.0
+            # if self.cli_args.augmented or self.cli_args.augment_flip:
+            self.augmentation_dict["flip"] = True
+            # if self.cli_args.augmented or self.cli_args.augment_offset:
+            self.augmentation_dict["offset"] = 0.1
+            # if self.cli_args.augmented or self.cli_args.augment_scale:
+            self.augmentation_dict["scale"] = 0.2
+            # if self.cli_args.augmented or self.cli_args.augment_rotate:
+            self.augmentation_dict["rotate"] = True
+            # if self.cli_args.augmented or self.cli_args.augment_noise:
+            self.augmentation_dict["noise"] = 25.0
 
         self.use_cuda = torch.cuda.is_available()
         self.device = torch.device("cuda" if self.use_cuda else "cpu")
@@ -115,28 +126,31 @@ class ClassificationTrainingApp:
         self.model = self.initModel()
         self.optimizer = self.initOptimizer()
 
-
     def initModel(self):
         model_cls = getattr(p2ch14.model, self.cli_args.model)
         model = model_cls()
 
         if self.cli_args.finetune:
-            d = torch.load(self.cli_args.finetune, map_location='cpu')
+            d = torch.load(self.cli_args.finetune, map_location="cpu")
             model_blocks = [
-                n for n, subm in model.named_children()
+                n
+                for n, subm in model.named_children()
                 if len(list(subm.parameters())) > 0
             ]
-            finetune_blocks = model_blocks[-self.cli_args.finetune_depth:]
-            log.info(f"finetuning from {self.cli_args.finetune}, blocks {' '.join(finetune_blocks)}")
+            finetune_blocks = model_blocks[-self.cli_args.finetune_depth :]
+            log.info(
+                f"finetuning from {self.cli_args.finetune}, blocks {' '.join(finetune_blocks)}"
+            )
             model.load_state_dict(
                 {
-                    k: v for k,v in d['model_state'].items()
-                    if k.split('.')[0] not in model_blocks[-1]
+                    k: v
+                    for k, v in d["model_state"].items()
+                    if k.split(".")[0] not in model_blocks[-1]
                 },
                 strict=False,
             )
             for n, p in model.named_parameters():
-                if n.split('.')[0] not in finetune_blocks:
+                if n.split(".")[0] not in finetune_blocks:
                     p.requires_grad_(False)
         if self.use_cuda:
             log.info("Using CUDA; {} devices.".format(torch.cuda.device_count()))
@@ -148,7 +162,7 @@ class ClassificationTrainingApp:
     def initOptimizer(self):
         lr = 0.003 if self.cli_args.finetune else 0.001
         return SGD(self.model.parameters(), lr=lr, weight_decay=1e-4)
-        #return Adam(self.model.parameters(), lr=3e-4)
+        # return Adam(self.model.parameters(), lr=3e-4)
 
     def initTrainDl(self):
         ds_cls = getattr(p2ch14.dsets, self.cli_args.dataset)
@@ -195,14 +209,14 @@ class ClassificationTrainingApp:
 
     def initTensorboardWriters(self):
         if self.trn_writer is None:
-            log_dir = os.path.join('runs', self.cli_args.tb_prefix,
-                                   self.time_str)
+            log_dir = os.path.join("runs", self.cli_args.tb_prefix, self.time_str)
 
             self.trn_writer = SummaryWriter(
-                log_dir=log_dir + '-trn_cls-' + self.cli_args.comment)
+                log_dir=log_dir + "-trn_cls-" + self.cli_args.comment
+            )
             self.val_writer = SummaryWriter(
-                log_dir=log_dir + '-val_cls-' + self.cli_args.comment)
-
+                log_dir=log_dir + "-val_cls-" + self.cli_args.comment
+            )
 
     def main(self):
         log.info("Starting {}, {}".format(type(self).__name__, self.cli_args))
@@ -214,31 +228,31 @@ class ClassificationTrainingApp:
         validation_cadence = 5 if not self.cli_args.finetune else 1
         for epoch_ndx in range(1, self.cli_args.epochs + 1):
 
-            log.info("Epoch {} of {}, {}/{} batches of size {}*{}".format(
-                epoch_ndx,
-                self.cli_args.epochs,
-                len(train_dl),
-                len(val_dl),
-                self.cli_args.batch_size,
-                (torch.cuda.device_count() if self.use_cuda else 1),
-            ))
+            log.info(
+                "Epoch {} of {}, {}/{} batches of size {}*{}".format(
+                    epoch_ndx,
+                    self.cli_args.epochs,
+                    len(train_dl),
+                    len(val_dl),
+                    self.cli_args.batch_size,
+                    (torch.cuda.device_count() if self.use_cuda else 1),
+                )
+            )
 
             trnMetrics_t = self.doTraining(epoch_ndx, train_dl)
-            self.logMetrics(epoch_ndx, 'trn', trnMetrics_t)
+            self.logMetrics(epoch_ndx, "trn", trnMetrics_t)
 
             if epoch_ndx == 1 or epoch_ndx % validation_cadence == 0:
                 valMetrics_t = self.doValidation(epoch_ndx, val_dl)
-                score = self.logMetrics(epoch_ndx, 'val', valMetrics_t)
+                score = self.logMetrics(epoch_ndx, "val", valMetrics_t)
                 best_score = max(score, best_score)
 
                 # TODO: this 'cls' will need to change for the malignant classifier
-                self.saveModel('cls', epoch_ndx, score == best_score)
+                self.saveModel("cls", epoch_ndx, score == best_score)
 
-
-        if hasattr(self, 'trn_writer'):
+        if hasattr(self, "trn_writer"):
             self.trn_writer.close()
             self.val_writer.close()
-
 
     def doTraining(self, epoch_ndx, train_dl):
         self.model.train()
@@ -258,11 +272,7 @@ class ClassificationTrainingApp:
             self.optimizer.zero_grad()
 
             loss_var = self.computeBatchLoss(
-                batch_ndx,
-                batch_tup,
-                train_dl.batch_size,
-                trnMetrics_g,
-                augment=True
+                batch_ndx, batch_tup, train_dl.batch_size, trnMetrics_g, augment=True
             )
 
             loss_var.backward()
@@ -270,8 +280,7 @@ class ClassificationTrainingApp:
 
         self.totalTrainingSamples_count += len(train_dl.dataset)
 
-        return trnMetrics_g.to('cpu')
-
+        return trnMetrics_g.to("cpu")
 
     def doValidation(self, epoch_ndx, val_dl):
         with torch.no_grad():
@@ -289,71 +298,63 @@ class ClassificationTrainingApp:
             )
             for batch_ndx, batch_tup in batch_iter:
                 self.computeBatchLoss(
-                    batch_ndx,
-                    batch_tup,
-                    val_dl.batch_size,
-                    valMetrics_g,
-                    augment=False
+                    batch_ndx, batch_tup, val_dl.batch_size, valMetrics_g, augment=False
                 )
 
-        return valMetrics_g.to('cpu')
+        return valMetrics_g.to("cpu")
 
-
-
-    def computeBatchLoss(self, batch_ndx, batch_tup, batch_size, metrics_g,
-                         augment=True):
+    def computeBatchLoss(
+        self, batch_ndx, batch_tup, batch_size, metrics_g, augment=True
+    ):
         input_t, label_t, index_t, _series_list, _center_list = batch_tup
 
         input_g = input_t.to(self.device, non_blocking=True)
         label_g = label_t.to(self.device, non_blocking=True)
         index_g = index_t.to(self.device, non_blocking=True)
 
-
         if augment:
             input_g = p2ch14.model.augment3d(input_g)
 
         logits_g, probability_g = self.model(input_g)
 
-        loss_g = nn.functional.cross_entropy(logits_g, label_g[:, 1],
-                                             reduction="none")
+        loss_g = nn.functional.cross_entropy(logits_g, label_g[:, 1], reduction="none")
         start_ndx = batch_ndx * batch_size
         end_ndx = start_ndx + label_t.size(0)
 
-        _, predLabel_g = torch.max(probability_g, dim=1, keepdim=False,
-                                   out=None)
+        _, predLabel_g = torch.max(probability_g, dim=1, keepdim=False, out=None)
 
         # log.debug(index_g)
 
         metrics_g[METRICS_LABEL_NDX, start_ndx:end_ndx] = index_g
         metrics_g[METRICS_PRED_NDX, start_ndx:end_ndx] = predLabel_g
         # metrics_g[METRICS_PRED_N_NDX, start_ndx:end_ndx] = probability_g[:,0]
-        metrics_g[METRICS_PRED_P_NDX, start_ndx:end_ndx] = probability_g[:,1]
+        metrics_g[METRICS_PRED_P_NDX, start_ndx:end_ndx] = probability_g[:, 1]
         # metrics_g[METRICS_PRED_M_NDX, start_ndx:end_ndx] = probability_g[:,2]
         metrics_g[METRICS_LOSS_NDX, start_ndx:end_ndx] = loss_g
 
         return loss_g.mean()
 
-
     def logMetrics(
-            self,
-            epoch_ndx,
-            mode_str,
-            metrics_t,
-            classificationThreshold=0.5,
+        self,
+        epoch_ndx,
+        mode_str,
+        metrics_t,
+        classificationThreshold=0.5,
     ):
         self.initTensorboardWriters()
-        log.info("E{} {}".format(
-            epoch_ndx,
-            type(self).__name__,
-        ))
+        log.info(
+            "E{} {}".format(
+                epoch_ndx,
+                type(self).__name__,
+            )
+        )
 
-        if self.cli_args.dataset == 'MalignantLunaDataset':
-            pos = 'mal'
-            neg = 'ben'
+        if self.cli_args.dataset == "MalignantLunaDataset":
+            pos = "mal"
+            neg = "ben"
         else:
-            pos = 'pos'
-            neg = 'neg'
-
+            pos = "pos"
+            neg = "neg"
 
         negLabel_mask = metrics_t[METRICS_LABEL_NDX] == 0
         negPred_mask = metrics_t[METRICS_PRED_NDX] == 0
@@ -387,41 +388,49 @@ class ClassificationTrainingApp:
         falseNeg_count = pos_count - pos_correct
 
         metrics_dict = {}
-        metrics_dict['loss/all'] = metrics_t[METRICS_LOSS_NDX].mean()
-        metrics_dict['loss/neg'] = metrics_t[METRICS_LOSS_NDX, negLabel_mask].mean()
-        metrics_dict['loss/pos'] = metrics_t[METRICS_LOSS_NDX, posLabel_mask].mean()
+        metrics_dict["loss/all"] = metrics_t[METRICS_LOSS_NDX].mean()
+        metrics_dict["loss/neg"] = metrics_t[METRICS_LOSS_NDX, negLabel_mask].mean()
+        metrics_dict["loss/pos"] = metrics_t[METRICS_LOSS_NDX, posLabel_mask].mean()
         # metrics_dict['loss/ben'] = metrics_t[METRICS_LOSS_NDX, benLabel_mask].mean()
         # metrics_dict['loss/mal'] = metrics_t[METRICS_LOSS_NDX, malLabel_mask].mean()
 
-        metrics_dict['correct/all'] = (pos_correct + neg_correct) / metrics_t.shape[1] * 100
-        metrics_dict['correct/neg'] = (neg_correct) / neg_count * 100
-        metrics_dict['correct/pos'] = (pos_correct) / pos_count * 100
+        metrics_dict["correct/all"] = (
+            (pos_correct + neg_correct) / metrics_t.shape[1] * 100
+        )
+        metrics_dict["correct/neg"] = (neg_correct) / neg_count * 100
+        metrics_dict["correct/pos"] = (pos_correct) / pos_count * 100
         # metrics_dict['correct/ben'] = (ben_correct) / ben_count * 100
         # metrics_dict['correct/mal'] = (mal_correct) / mal_count * 100
 
-        precision = metrics_dict['pr/precision'] = \
-            truePos_count / np.float64(truePos_count + falsePos_count)
-        recall    = metrics_dict['pr/recall'] = \
-            truePos_count / np.float64(truePos_count + falseNeg_count)
+        precision = metrics_dict["pr/precision"] = truePos_count / np.float64(
+            truePos_count + falsePos_count
+        )
+        recall = metrics_dict["pr/recall"] = truePos_count / np.float64(
+            truePos_count + falseNeg_count
+        )
 
-        metrics_dict['pr/f1_score'] = \
-            2 * (precision * recall) / (precision + recall)
+        metrics_dict["pr/f1_score"] = 2 * (precision * recall) / (precision + recall)
 
         threshold = torch.linspace(1, 0)
-        tpr = (metrics_t[None, METRICS_PRED_P_NDX, posLabel_mask] >= threshold[:, None]).sum(1).float() / pos_count
-        fpr = (metrics_t[None, METRICS_PRED_P_NDX, negLabel_mask] >= threshold[:, None]).sum(1).float() / neg_count
-        fp_diff = fpr[1:]-fpr[:-1]
-        tp_avg  = (tpr[1:]+tpr[:-1])/2
+        tpr = (
+            metrics_t[None, METRICS_PRED_P_NDX, posLabel_mask] >= threshold[:, None]
+        ).sum(1).float() / pos_count
+        fpr = (
+            metrics_t[None, METRICS_PRED_P_NDX, negLabel_mask] >= threshold[:, None]
+        ).sum(1).float() / neg_count
+        fp_diff = fpr[1:] - fpr[:-1]
+        tp_avg = (tpr[1:] + tpr[:-1]) / 2
         auc = (fp_diff * tp_avg).sum()
-        metrics_dict['auc'] = auc
+        metrics_dict["auc"] = auc
 
         log.info(
-            ("E{} {:8} {loss/all:.4f} loss, "
-                 + "{correct/all:-5.1f}% correct, "
-                 + "{pr/precision:.4f} precision, "
-                 + "{pr/recall:.4f} recall, "
-                 + "{pr/f1_score:.4f} f1 score, "
-                 + "{auc:.4f} auc"
+            (
+                "E{} {:8} {loss/all:.4f} loss, "
+                + "{correct/all:-5.1f}% correct, "
+                + "{pr/precision:.4f} precision, "
+                + "{pr/recall:.4f} recall, "
+                + "{pr/f1_score:.4f} f1 score, "
+                + "{auc:.4f} auc"
             ).format(
                 epoch_ndx,
                 mode_str,
@@ -429,22 +438,24 @@ class ClassificationTrainingApp:
             )
         )
         log.info(
-            ("E{} {:8} {loss/neg:.4f} loss, "
-                 + "{correct/neg:-5.1f}% correct ({neg_correct:} of {neg_count:})"
+            (
+                "E{} {:8} {loss/neg:.4f} loss, "
+                + "{correct/neg:-5.1f}% correct ({neg_correct:} of {neg_count:})"
             ).format(
                 epoch_ndx,
-                mode_str + '_' + neg,
+                mode_str + "_" + neg,
                 neg_correct=neg_correct,
                 neg_count=neg_count,
                 **metrics_dict,
             )
         )
         log.info(
-            ("E{} {:8} {loss/pos:.4f} loss, "
-                 + "{correct/pos:-5.1f}% correct ({pos_correct:} of {pos_count:})"
+            (
+                "E{} {:8} {loss/pos:.4f} loss, "
+                + "{correct/pos:-5.1f}% correct ({pos_correct:} of {pos_count:})"
             ).format(
                 epoch_ndx,
-                mode_str + '_' + pos,
+                mode_str + "_" + pos,
                 pos_correct=pos_correct,
                 pos_count=pos_count,
                 **metrics_dict,
@@ -472,61 +483,61 @@ class ClassificationTrainingApp:
         #         **metrics_dict,
         #     )
         # )
-        writer = getattr(self, mode_str + '_writer')
+        writer = getattr(self, mode_str + "_writer")
 
         for key, value in metrics_dict.items():
-            key = key.replace('pos', pos)
-            key = key.replace('neg', neg)
+            key = key.replace("pos", pos)
+            key = key.replace("neg", neg)
             writer.add_scalar(key, value, self.totalTrainingSamples_count)
 
         fig = pyplot.figure()
         pyplot.plot(fpr, tpr)
-        writer.add_figure('roc', fig, self.totalTrainingSamples_count)
+        writer.add_figure("roc", fig, self.totalTrainingSamples_count)
 
-        writer.add_scalar('auc', auc, self.totalTrainingSamples_count)
-# # tag::logMetrics_writer_prcurve[]
-#        writer.add_pr_curve(
-#            'pr',
-#            metrics_t[METRICS_LABEL_NDX],
-#            metrics_t[METRICS_PRED_P_NDX],
-#            self.totalTrainingSamples_count,
-#        )
-# # end::logMetrics_writer_prcurve[]
+        writer.add_scalar("auc", auc, self.totalTrainingSamples_count)
+        # # tag::logMetrics_writer_prcurve[]
+        #        writer.add_pr_curve(
+        #            'pr',
+        #            metrics_t[METRICS_LABEL_NDX],
+        #            metrics_t[METRICS_PRED_P_NDX],
+        #            self.totalTrainingSamples_count,
+        #        )
+        # # end::logMetrics_writer_prcurve[]
 
         bins = np.linspace(0, 1)
 
         writer.add_histogram(
-            'label_neg',
+            "label_neg",
             metrics_t[METRICS_PRED_P_NDX, negLabel_mask],
             self.totalTrainingSamples_count,
-            bins=bins
+            bins=bins,
         )
         writer.add_histogram(
-            'label_pos',
+            "label_pos",
             metrics_t[METRICS_PRED_P_NDX, posLabel_mask],
             self.totalTrainingSamples_count,
-            bins=bins
+            bins=bins,
         )
 
         if not self.cli_args.malignant:
-            score = metrics_dict['pr/f1_score']
+            score = metrics_dict["pr/f1_score"]
         else:
-            score = metrics_dict['auc']
+            score = metrics_dict["auc"]
 
         return score
 
     def saveModel(self, type_str, epoch_ndx, isBest=False):
         file_path = os.path.join(
-            'data-unversioned',
-            'part2',
-            'models',
+            "data-unversioned",
+            "part2",
+            "models",
             self.cli_args.tb_prefix,
-            '{}_{}_{}.{}.state'.format(
+            "{}_{}_{}.{}.state".format(
                 type_str,
                 self.time_str,
                 self.cli_args.comment,
                 self.totalTrainingSamples_count,
-            )
+            ),
         )
 
         os.makedirs(os.path.dirname(file_path), mode=0o755, exist_ok=True)
@@ -536,12 +547,12 @@ class ClassificationTrainingApp:
             model = model.module
 
         state = {
-            'model_state': model.state_dict(),
-            'model_name': type(model).__name__,
-            'optimizer_state' : self.optimizer.state_dict(),
-            'optimizer_name': type(self.optimizer).__name__,
-            'epoch': epoch_ndx,
-            'totalTrainingSamples_count': self.totalTrainingSamples_count,
+            "model_state": model.state_dict(),
+            "model_name": type(model).__name__,
+            "optimizer_state": self.optimizer.state_dict(),
+            "optimizer_name": type(self.optimizer).__name__,
+            "epoch": epoch_ndx,
+            "totalTrainingSamples_count": self.totalTrainingSamples_count,
         }
         torch.save(state, file_path)
 
@@ -549,22 +560,22 @@ class ClassificationTrainingApp:
 
         if isBest:
             best_path = os.path.join(
-                'data-unversioned',
-                'part2',
-                'models',
+                "data-unversioned",
+                "part2",
+                "models",
                 self.cli_args.tb_prefix,
-                '{}_{}_{}.{}.state'.format(
+                "{}_{}_{}.{}.state".format(
                     type_str,
                     self.time_str,
                     self.cli_args.comment,
-                    'best',
-                )
+                    "best",
+                ),
             )
             shutil.copyfile(file_path, best_path)
 
             log.debug("Saved model params to {}".format(best_path))
 
-        with open(file_path, 'rb') as f:
+        with open(file_path, "rb") as f:
             log.info("SHA1: " + hashlib.sha1(f.read()).hexdigest())
 
     # def logModelMetrics(self, model):
@@ -593,5 +604,5 @@ class ClassificationTrainingApp:
     #                 raise
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     ClassificationTrainingApp().main()

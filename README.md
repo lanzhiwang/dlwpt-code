@@ -53,7 +53,7 @@ it to computing challenges.
 ```bash
 docker run -it --rm -p 10000:8888 \
 -v ~/work/code/py_code/dlwpt-code:/home/jovyan/work \
-jupyter/minimal-notebook:x86_64-python-3.8.13
+jupyter/minimal-notebook:x86_64-python-3.11.6
 
 python -m venv .env
 
@@ -66,10 +66,8 @@ conda install --yes --file requirements.txt
 find . -name "*.ipynb" -exec black {} \;
 find . -name "*checkpoints*"
 
-docker run -it --rm \
--v ~/work/code/py_code/dlwpt-code:/work \
--w /work \
-python:3.6.8-slim bash
+
+
 
 
 

@@ -37,15 +37,17 @@ class LunaModel(nn.Module):
                 nn.ConvTranspose3d,
             }:
                 nn.init.kaiming_normal_(
-                    m.weight.data, a=0, mode='fan_out', nonlinearity='relu',
+                    m.weight.data,
+                    a=0,
+                    mode="fan_out",
+                    nonlinearity="relu",
                 )
                 if m.bias is not None:
-                    fan_in, fan_out = \
-                        nn.init._calculate_fan_in_and_fan_out(m.weight.data)
+                    fan_in, fan_out = nn.init._calculate_fan_in_and_fan_out(
+                        m.weight.data
+                    )
                     bound = 1 / math.sqrt(fan_out)
                     nn.init.normal_(m.bias, -bound, bound)
-
-
 
     def forward(self, input_batch):
         bn_output = self.tail_batchnorm(input_batch)
@@ -69,11 +71,19 @@ class LunaBlock(nn.Module):
         super().__init__()
 
         self.conv1 = nn.Conv3d(
-            in_channels, conv_channels, kernel_size=3, padding=1, bias=True,
+            in_channels,
+            conv_channels,
+            kernel_size=3,
+            padding=1,
+            bias=True,
         )
         self.relu1 = nn.ReLU(inplace=True)
         self.conv2 = nn.Conv3d(
-            conv_channels, conv_channels, kernel_size=3, padding=1, bias=True,
+            conv_channels,
+            conv_channels,
+            kernel_size=3,
+            padding=1,
+            bias=True,
         )
         self.relu2 = nn.ReLU(inplace=True)
 

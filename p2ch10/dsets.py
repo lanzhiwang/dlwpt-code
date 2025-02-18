@@ -22,23 +22,24 @@ log = logging.getLogger(__name__)
 # log.setLevel(logging.INFO)
 log.setLevel(logging.DEBUG)
 
-raw_cache = getCache('part2ch10_raw')
+raw_cache = getCache("part2ch10_raw")
 
 CandidateInfoTuple = namedtuple(
-    'CandidateInfoTuple',
-    'isNodule_bool, diameter_mm, series_uid, center_xyz',
+    "CandidateInfoTuple",
+    "isNodule_bool, diameter_mm, series_uid, center_xyz",
 )
+
 
 @functools.lru_cache(1)
 def getCandidateInfoList(requireOnDisk_bool=True):
     # We construct a set with all series_uids that are present on disk.
     # This will let us use the data, even if we haven't downloaded all of
     # the subsets yet.
-    mhd_list = glob.glob('data-unversioned/part2/luna/subset*/*.mhd')
+    mhd_list = glob.glob("data-unversioned/part2/luna/subset*/*.mhd")
     presentOnDisk_set = {os.path.split(p)[-1][:-4] for p in mhd_list}
 
     diameter_dict = {}
-    with open('data/part2/luna/annotations.csv', "r") as f:
+    with open("data/part2/luna/annotations.csv", "r") as f:
         for row in list(csv.reader(f))[1:]:
             series_uid = row[0]
             annotationCenter_xyz = tuple([float(x) for x in row[1:4]])
@@ -49,7 +50,7 @@ def getCandidateInfoList(requireOnDisk_bool=True):
             )
 
     candidateInfo_list = []
-    with open('data/part2/luna/candidates.csv', "r") as f:
+    with open("data/part2/luna/candidates.csv", "r") as f:
         for row in list(csv.reader(f))[1:]:
             series_uid = row[0]
 
@@ -70,20 +71,23 @@ def getCandidateInfoList(requireOnDisk_bool=True):
                     candidateDiameter_mm = annotationDiameter_mm
                     break
 
-            candidateInfo_list.append(CandidateInfoTuple(
-                isNodule_bool,
-                candidateDiameter_mm,
-                series_uid,
-                candidateCenter_xyz,
-            ))
+            candidateInfo_list.append(
+                CandidateInfoTuple(
+                    isNodule_bool,
+                    candidateDiameter_mm,
+                    series_uid,
+                    candidateCenter_xyz,
+                )
+            )
 
     candidateInfo_list.sort(reverse=True)
     return candidateInfo_list
 
+
 class Ct:
     def __init__(self, series_uid):
         mhd_path = glob.glob(
-            'data-unversioned/part2/luna/subset*/{}.mhd'.format(series_uid)
+            "data-unversioned/part2/luna/subset*/{}.mhd".format(series_uid)
         )[0]
 
         ct_mhd = sitk.ReadImage(mhd_path)
@@ -112,10 +116,19 @@ class Ct:
 
         slice_list = []
         for axis, center_val in enumerate(center_irc):
-            start_ndx = int(round(center_val - width_irc[axis]/2))
+            start_ndx = int(round(center_val - width_irc[axis] / 2))
             end_ndx = int(start_ndx + width_irc[axis])
 
-            assert center_val >= 0 and center_val < self.hu_a.shape[axis], repr([self.series_uid, center_xyz, self.origin_xyz, self.vxSize_xyz, center_irc, axis])
+            assert center_val >= 0 and center_val < self.hu_a.shape[axis], repr(
+                [
+                    self.series_uid,
+                    center_xyz,
+                    self.origin_xyz,
+                    self.vxSize_xyz,
+                    center_irc,
+                    axis,
+                ]
+            )
 
             if start_ndx < 0:
                 # log.warning("Crop outside of CT array: {} {}, center:{} shape:{} width:{}".format(
@@ -140,18 +153,21 @@ class Ct:
 def getCt(series_uid):
     return Ct(series_uid)
 
+
 @raw_cache.memoize(typed=True)
 def getCtRawCandidate(series_uid, center_xyz, width_irc):
     ct = getCt(series_uid)
     ct_chunk, center_irc = ct.getRawCandidate(center_xyz, width_irc)
     return ct_chunk, center_irc
 
+
 class LunaDataset(Dataset):
-    def __init__(self,
-                 val_stride=0,
-                 isValSet_bool=None,
-                 series_uid=None,
-            ):
+    def __init__(
+        self,
+        val_stride=0,
+        isValSet_bool=None,
+        series_uid=None,
+    ):
         self.candidateInfo_list = copy.copy(getCandidateInfoList())
 
         if series_uid:
@@ -167,11 +183,13 @@ class LunaDataset(Dataset):
             del self.candidateInfo_list[::val_stride]
             assert self.candidateInfo_list
 
-        log.info("{!r}: {} {} samples".format(
-            self,
-            len(self.candidateInfo_list),
-            "validation" if isValSet_bool else "training",
-        ))
+        log.info(
+            "{!r}: {} {} samples".format(
+                self,
+                len(self.candidateInfo_list),
+                "validation" if isValSet_bool else "training",
+            )
+        )
 
     def __len__(self):
         return len(self.candidateInfo_list)
@@ -190,10 +208,8 @@ class LunaDataset(Dataset):
         candidate_t = candidate_t.to(torch.float32)
         candidate_t = candidate_t.unsqueeze(0)
 
-        pos_t = torch.tensor([
-                not candidateInfo_tup.isNodule_bool,
-                candidateInfo_tup.isNodule_bool
-            ],
+        pos_t = torch.tensor(
+            [not candidateInfo_tup.isNodule_bool, candidateInfo_tup.isNodule_bool],
             dtype=torch.long,
         )
 

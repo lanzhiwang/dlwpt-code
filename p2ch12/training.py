@@ -23,10 +23,11 @@ log.setLevel(logging.INFO)
 # log.setLevel(logging.DEBUG)
 
 # Used for computeBatchLoss and logMetrics to index into metrics_t/metrics_a
-METRICS_LABEL_NDX=0
-METRICS_PRED_NDX=1
-METRICS_LOSS_NDX=2
+METRICS_LABEL_NDX = 0
+METRICS_PRED_NDX = 1
+METRICS_LOSS_NDX = 2
 METRICS_SIZE = 3
+
 
 class LunaTrainingApp:
     def __init__(self, sys_argv=None):
@@ -34,69 +35,81 @@ class LunaTrainingApp:
             sys_argv = sys.argv[1:]
 
         parser = argparse.ArgumentParser()
-        parser.add_argument('--batch-size',
-            help='Batch size to use for training',
+        parser.add_argument(
+            "--batch-size",
+            help="Batch size to use for training",
             default=32,
             type=int,
         )
-        parser.add_argument('--num-workers',
-            help='Number of worker processes for background data loading',
+        parser.add_argument(
+            "--num-workers",
+            help="Number of worker processes for background data loading",
             default=8,
             type=int,
         )
-        parser.add_argument('--epochs',
-            help='Number of epochs to train for',
+        parser.add_argument(
+            "--epochs",
+            help="Number of epochs to train for",
             default=1,
             type=int,
         )
-        parser.add_argument('--balanced',
+        parser.add_argument(
+            "--balanced",
             help="Balance the training data to half positive, half negative.",
-            action='store_true',
+            action="store_true",
             default=False,
         )
-        parser.add_argument('--augmented',
+        parser.add_argument(
+            "--augmented",
             help="Augment the training data.",
-            action='store_true',
+            action="store_true",
             default=False,
         )
-        parser.add_argument('--augment-flip',
+        parser.add_argument(
+            "--augment-flip",
             help="Augment the training data by randomly flipping the data left-right, up-down, and front-back.",
-            action='store_true',
+            action="store_true",
             default=False,
         )
-        parser.add_argument('--augment-offset',
+        parser.add_argument(
+            "--augment-offset",
             help="Augment the training data by randomly offsetting the data slightly along the X and Y axes.",
-            action='store_true',
+            action="store_true",
             default=False,
         )
-        parser.add_argument('--augment-scale',
+        parser.add_argument(
+            "--augment-scale",
             help="Augment the training data by randomly increasing or decreasing the size of the candidate.",
-            action='store_true',
+            action="store_true",
             default=False,
         )
-        parser.add_argument('--augment-rotate',
+        parser.add_argument(
+            "--augment-rotate",
             help="Augment the training data by randomly rotating the data around the head-foot axis.",
-            action='store_true',
+            action="store_true",
             default=False,
         )
-        parser.add_argument('--augment-noise',
+        parser.add_argument(
+            "--augment-noise",
             help="Augment the training data by randomly adding noise to the data.",
-            action='store_true',
+            action="store_true",
             default=False,
         )
 
-        parser.add_argument('--tb-prefix',
-            default='p2ch12',
+        parser.add_argument(
+            "--tb-prefix",
+            default="p2ch12",
             help="Data prefix to use for Tensorboard run. Defaults to chapter.",
         )
-        parser.add_argument('comment',
+        parser.add_argument(
+            "comment",
             help="Comment suffix for Tensorboard run.",
-            nargs='?',
-            default='dlwpt',
+            nargs="?",
+            default="dlwpt",
         )
 
         self.cli_args = parser.parse_args(sys_argv)
-        self.time_str = datetime.datetime.now().strftime('%Y-%m-%d_%H.%M.%S')
+        self.time_str = datetime.datetime.now().strftime("%Y-%m-%d_%H.%M.%S")
 
         self.trn_writer = None
         self.val_writer = None
@@ -104,22 +117,21 @@ class LunaTrainingApp:
 
         self.augmentation_dict = {}
         if self.cli_args.augmented or self.cli_args.augment_flip:
-            self.augmentation_dict['flip'] = True
+            self.augmentation_dict["flip"] = True
         if self.cli_args.augmented or self.cli_args.augment_offset:
-            self.augmentation_dict['offset'] = 0.1
+            self.augmentation_dict["offset"] = 0.1
         if self.cli_args.augmented or self.cli_args.augment_scale:
-            self.augmentation_dict['scale'] = 0.2
+            self.augmentation_dict["scale"] = 0.2
         if self.cli_args.augmented or self.cli_args.augment_rotate:
-            self.augmentation_dict['rotate'] = True
+            self.augmentation_dict["rotate"] = True
         if self.cli_args.augmented or self.cli_args.augment_noise:
-            self.augmentation_dict['noise'] = 25.0
+            self.augmentation_dict["noise"] = 25.0
 
         self.use_cuda = torch.cuda.is_available()
         self.device = torch.device("cuda" if self.use_cuda else "cpu")
 
         self.model = self.initModel()
         self.optimizer = self.initOptimizer()
-
 
     def initModel(self):
         model = LunaModel()
@@ -176,13 +188,14 @@ class LunaTrainingApp:
 
     def initTensorboardWriters(self):
         if self.trn_writer is None:
-            log_dir = os.path.join('runs', self.cli_args.tb_prefix, self.time_str)
+            log_dir = os.path.join("runs", self.cli_args.tb_prefix, self.time_str)
 
             self.trn_writer = SummaryWriter(
-                log_dir=log_dir + '-trn_cls-' + self.cli_args.comment)
+                log_dir=log_dir + "-trn_cls-" + self.cli_args.comment
+            )
             self.val_writer = SummaryWriter(
-                log_dir=log_dir + '-val_cls-' + self.cli_args.comment)
-
+                log_dir=log_dir + "-val_cls-" + self.cli_args.comment
+            )
 
     def main(self):
         log.info("Starting {}, {}".format(type(self).__name__, self.cli_args))
@@ -192,25 +205,26 @@ class LunaTrainingApp:
 
         for epoch_ndx in range(1, self.cli_args.epochs + 1):
 
-            log.info("Epoch {} of {}, {}/{} batches of size {}*{}".format(
-                epoch_ndx,
-                self.cli_args.epochs,
-                len(train_dl),
-                len(val_dl),
-                self.cli_args.batch_size,
-                (torch.cuda.device_count() if self.use_cuda else 1),
-            ))
+            log.info(
+                "Epoch {} of {}, {}/{} batches of size {}*{}".format(
+                    epoch_ndx,
+                    self.cli_args.epochs,
+                    len(train_dl),
+                    len(val_dl),
+                    self.cli_args.batch_size,
+                    (torch.cuda.device_count() if self.use_cuda else 1),
+                )
+            )
 
             trnMetrics_t = self.doTraining(epoch_ndx, train_dl)
-            self.logMetrics(epoch_ndx, 'trn', trnMetrics_t)
+            self.logMetrics(epoch_ndx, "trn", trnMetrics_t)
 
             valMetrics_t = self.doValidation(epoch_ndx, val_dl)
-            self.logMetrics(epoch_ndx, 'val', valMetrics_t)
+            self.logMetrics(epoch_ndx, "val", valMetrics_t)
 
-        if hasattr(self, 'trn_writer'):
+        if hasattr(self, "trn_writer"):
             self.trn_writer.close()
             self.val_writer.close()
-
 
     def doTraining(self, epoch_ndx, train_dl):
         self.model.train()
@@ -241,8 +255,7 @@ class LunaTrainingApp:
 
         self.totalTrainingSamples_count += len(train_dl.dataset)
 
-        return trnMetrics_g.to('cpu')
-
+        return trnMetrics_g.to("cpu")
 
     def doValidation(self, epoch_ndx, val_dl):
         with torch.no_grad():
@@ -266,9 +279,7 @@ class LunaTrainingApp:
                     valMetrics_g,
                 )
 
-        return valMetrics_g.to('cpu')
-
-
+        return valMetrics_g.to("cpu")
 
     def computeBatchLoss(self, batch_ndx, batch_tup, batch_size, metrics_g):
         input_t, label_t, _series_list, _center_list = batch_tup
@@ -278,33 +289,34 @@ class LunaTrainingApp:
 
         logits_g, probability_g = self.model(input_g)
 
-        loss_func = nn.CrossEntropyLoss(reduction='none')
+        loss_func = nn.CrossEntropyLoss(reduction="none")
         loss_g = loss_func(
             logits_g,
-            label_g[:,1],
+            label_g[:, 1],
         )
         start_ndx = batch_ndx * batch_size
         end_ndx = start_ndx + label_t.size(0)
 
-        metrics_g[METRICS_LABEL_NDX, start_ndx:end_ndx] = label_g[:,1]
-        metrics_g[METRICS_PRED_NDX, start_ndx:end_ndx] = probability_g[:,1]
+        metrics_g[METRICS_LABEL_NDX, start_ndx:end_ndx] = label_g[:, 1]
+        metrics_g[METRICS_PRED_NDX, start_ndx:end_ndx] = probability_g[:, 1]
         metrics_g[METRICS_LOSS_NDX, start_ndx:end_ndx] = loss_g
 
         return loss_g.mean()
 
-
     def logMetrics(
-            self,
-            epoch_ndx,
-            mode_str,
-            metrics_t,
-            classificationThreshold=0.5,
+        self,
+        epoch_ndx,
+        mode_str,
+        metrics_t,
+        classificationThreshold=0.5,
     ):
         self.initTensorboardWriters()
-        log.info("E{} {}".format(
-            epoch_ndx,
-            type(self).__name__,
-        ))
+        log.info(
+            "E{} {}".format(
+                epoch_ndx,
+                type(self).__name__,
+            )
+        )
 
         negLabel_mask = metrics_t[METRICS_LABEL_NDX] <= classificationThreshold
         negPred_mask = metrics_t[METRICS_PRED_NDX] <= classificationThreshold
@@ -322,28 +334,32 @@ class LunaTrainingApp:
         falseNeg_count = pos_count - pos_correct
 
         metrics_dict = {}
-        metrics_dict['loss/all'] = metrics_t[METRICS_LOSS_NDX].mean()
-        metrics_dict['loss/neg'] = metrics_t[METRICS_LOSS_NDX, negLabel_mask].mean()
-        metrics_dict['loss/pos'] = metrics_t[METRICS_LOSS_NDX, posLabel_mask].mean()
+        metrics_dict["loss/all"] = metrics_t[METRICS_LOSS_NDX].mean()
+        metrics_dict["loss/neg"] = metrics_t[METRICS_LOSS_NDX, negLabel_mask].mean()
+        metrics_dict["loss/pos"] = metrics_t[METRICS_LOSS_NDX, posLabel_mask].mean()
 
-        metrics_dict['correct/all'] = (pos_correct + neg_correct) / metrics_t.shape[1] * 100
-        metrics_dict['correct/neg'] = (neg_correct) / neg_count * 100
-        metrics_dict['correct/pos'] = (pos_correct) / pos_count * 100
+        metrics_dict["correct/all"] = (
+            (pos_correct + neg_correct) / metrics_t.shape[1] * 100
+        )
+        metrics_dict["correct/neg"] = (neg_correct) / neg_count * 100
+        metrics_dict["correct/pos"] = (pos_correct) / pos_count * 100
 
-        precision = metrics_dict['pr/precision'] = \
-            truePos_count / np.float32(truePos_count + falsePos_count)
-        recall    = metrics_dict['pr/recall'] = \
-            truePos_count / np.float32(truePos_count + falseNeg_count)
+        precision = metrics_dict["pr/precision"] = truePos_count / np.float32(
+            truePos_count + falsePos_count
+        )
+        recall = metrics_dict["pr/recall"] = truePos_count / np.float32(
+            truePos_count + falseNeg_count
+        )
 
-        metrics_dict['pr/f1_score'] = \
-            2 * (precision * recall) / (precision + recall)
+        metrics_dict["pr/f1_score"] = 2 * (precision * recall) / (precision + recall)
 
         log.info(
-            ("E{} {:8} {loss/all:.4f} loss, "
-                 + "{correct/all:-5.1f}% correct, "
-                 + "{pr/precision:.4f} precision, "
-                 + "{pr/recall:.4f} recall, "
-                 + "{pr/f1_score:.4f} f1 score"
+            (
+                "E{} {:8} {loss/all:.4f} loss, "
+                + "{correct/all:-5.1f}% correct, "
+                + "{pr/precision:.4f} precision, "
+                + "{pr/recall:.4f} recall, "
+                + "{pr/f1_score:.4f} f1 score"
             ).format(
                 epoch_ndx,
                 mode_str,
@@ -351,54 +367,56 @@ class LunaTrainingApp:
             )
         )
         log.info(
-            ("E{} {:8} {loss/neg:.4f} loss, "
-                 + "{correct/neg:-5.1f}% correct ({neg_correct:} of {neg_count:})"
+            (
+                "E{} {:8} {loss/neg:.4f} loss, "
+                + "{correct/neg:-5.1f}% correct ({neg_correct:} of {neg_count:})"
             ).format(
                 epoch_ndx,
-                mode_str + '_neg',
+                mode_str + "_neg",
                 neg_correct=neg_correct,
                 neg_count=neg_count,
                 **metrics_dict,
             )
         )
         log.info(
-            ("E{} {:8} {loss/pos:.4f} loss, "
-                 + "{correct/pos:-5.1f}% correct ({pos_correct:} of {pos_count:})"
+            (
+                "E{} {:8} {loss/pos:.4f} loss, "
+                + "{correct/pos:-5.1f}% correct ({pos_correct:} of {pos_count:})"
             ).format(
                 epoch_ndx,
-                mode_str + '_pos',
+                mode_str + "_pos",
                 pos_correct=pos_correct,
                 pos_count=pos_count,
                 **metrics_dict,
             )
         )
-        writer = getattr(self, mode_str + '_writer')
+        writer = getattr(self, mode_str + "_writer")
 
         for key, value in metrics_dict.items():
             writer.add_scalar(key, value, self.totalTrainingSamples_count)
 
         writer.add_pr_curve(
-            'pr',
+            "pr",
             metrics_t[METRICS_LABEL_NDX],
             metrics_t[METRICS_PRED_NDX],
             self.totalTrainingSamples_count,
         )
 
-        bins = [x/50.0 for x in range(51)]
+        bins = [x / 50.0 for x in range(51)]
 
         negHist_mask = negLabel_mask & (metrics_t[METRICS_PRED_NDX] > 0.01)
         posHist_mask = posLabel_mask & (metrics_t[METRICS_PRED_NDX] < 0.99)
 
         if negHist_mask.any():
             writer.add_histogram(
-                'is_neg',
+                "is_neg",
                 metrics_t[METRICS_PRED_NDX, negHist_mask],
                 self.totalTrainingSamples_count,
                 bins=bins,
             )
         if posHist_mask.any():
             writer.add_histogram(
-                'is_pos',
+                "is_pos",
                 metrics_t[METRICS_PRED_NDX, posHist_mask],
                 self.totalTrainingSamples_count,
                 bins=bins,
@@ -437,5 +455,5 @@ class LunaTrainingApp:
     #                 raise
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     LunaTrainingApp().main()

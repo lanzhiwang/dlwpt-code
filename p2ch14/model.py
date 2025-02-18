@@ -13,45 +13,49 @@ log.setLevel(logging.DEBUG)
 
 import random
 
+
 def augment3d(inp):
     transform_t = torch.eye(4, dtype=torch.float32)
     for i in range(3):
-        if True: #'flip' in augmentation_dict:
+        if True:  #'flip' in augmentation_dict:
             if random.random() > 0.5:
-                transform_t[i,i] *= -1
-        if True: #'offset' in augmentation_dict:
+                transform_t[i, i] *= -1
+        if True:  #'offset' in augmentation_dict:
             offset_float = 0.1
-            random_float = (random.random() * 2 - 1)
-            transform_t[3,i] = offset_float * random_float
+            random_float = random.random() * 2 - 1
+            transform_t[3, i] = offset_float * random_float
     if True:
         angle_rad = random.random() * np.pi * 2
         s = np.sin(angle_rad)
         c = np.cos(angle_rad)
 
-        rotation_t = torch.tensor([
-            [c, -s, 0, 0],
-            [s, c, 0, 0],
-            [0, 0, 1, 0],
-            [0, 0, 0, 1],
-        ], dtype=torch.float32)
+        rotation_t = torch.tensor(
+            [
+                [c, -s, 0, 0],
+                [s, c, 0, 0],
+                [0, 0, 1, 0],
+                [0, 0, 0, 1],
+            ],
+            dtype=torch.float32,
+        )
 
         transform_t @= rotation_t
-    #print(inp.shape, transform_t[:3].unsqueeze(0).expand(inp.size(0), -1, -1).shape)
+    # print(inp.shape, transform_t[:3].unsqueeze(0).expand(inp.size(0), -1, -1).shape)
     affine_t = torch.nn.functional.affine_grid(
-            transform_t[:3].unsqueeze(0).expand(inp.size(0), -1, -1).cuda(),
-            inp.shape,
-            align_corners=False,
-        )
+        transform_t[:3].unsqueeze(0).expand(inp.size(0), -1, -1).cuda(),
+        inp.shape,
+        align_corners=False,
+    )
 
     augmented_chunk = torch.nn.functional.grid_sample(
-            inp,
-            affine_t,
-            padding_mode='border',
-            align_corners=False,
-        )
-    if False: #'noise' in augmentation_dict:
+        inp,
+        affine_t,
+        padding_mode="border",
+        align_corners=False,
+    )
+    if False:  #'noise' in augmentation_dict:
         noise_t = torch.randn_like(augmented_chunk)
-        noise_t *= augmentation_dict['noise']
+        noise_t *= augmentation_dict["noise"]
 
         augmented_chunk += noise_t
     return augmented_chunk
@@ -85,14 +89,14 @@ class LunaModel(nn.Module):
                 nn.ConvTranspose3d,
             }:
                 nn.init.kaiming_normal_(
-                    m.weight.data, a=0, mode='fan_out', nonlinearity='relu'
+                    m.weight.data, a=0, mode="fan_out", nonlinearity="relu"
                 )
                 if m.bias is not None:
-                    fan_in, fan_out = \
-                        nn.init._calculate_fan_in_and_fan_out(m.weight.data)
+                    fan_in, fan_out = nn.init._calculate_fan_in_and_fan_out(
+                        m.weight.data
+                    )
                     bound = 1 / math.sqrt(fan_out)
                     nn.init.normal_(m.bias, -bound, bound)
-
 
     def forward(self, input_batch):
         bn_output = self.tail_batchnorm(input_batch)
@@ -125,7 +129,6 @@ class LunaBlock(nn.Module):
         self.relu2 = nn.ReLU(inplace=True)
 
         self.maxpool = nn.MaxPool3d(2, 2)
-
 
     def forward(self, input_batch):
         block_out = self.conv1(input_batch)

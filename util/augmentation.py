@@ -11,10 +11,12 @@ from torch.autograd.function import once_differentiable
 import torch.backends.cudnn as cudnn
 
 from util.logconf import logging
+
 log = logging.getLogger(__name__)
 # log.setLevel(logging.WARN)
 # log.setLevel(logging.INFO)
 log.setLevel(logging.DEBUG)
+
 
 def cropToShape(image, new_shape, center_list=None, fill=0.0):
     # log.debug([image.shape, new_shape, center_list])
@@ -30,7 +32,7 @@ def cropToShape(image, new_shape, center_list=None, fill=0.0):
 
             # We can't just do crop_int +/- shape/2 since shape might be odd
             # and ints round down.
-            start_int = crop_int - int(new_shape[i]/2)
+            start_int = crop_int - int(new_shape[i] / 2)
             end_int = start_int + new_shape[i]
             crop_list.append(slice(max(0, start_int), end_int))
         else:
@@ -68,10 +70,17 @@ def zoomToShape(image, new_shape, square=True):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         image = scipy.ndimage.interpolation.zoom(
-            image, zoom_shape,
-            output=None, order=0, mode='nearest', cval=0.0, prefilter=True)
+            image,
+            zoom_shape,
+            output=None,
+            order=0,
+            mode="nearest",
+            cval=0.0,
+            prefilter=True,
+        )
 
     return image
+
 
 def randomOffset(image_list, offset_rows=0.125, offset_cols=0.125):
 
@@ -100,8 +109,14 @@ def randomZoom(image_list, scale=None, scale_min=0.8, scale_max=1.3):
             warnings.simplefilter("ignore")
             # log.info([image.shape])
             zimage = scipy.ndimage.interpolation.zoom(
-                image, [scale, scale, 1.0],
-                output=None, order=0, mode='nearest', cval=0.0, prefilter=True)
+                image,
+                [scale, scale, 1.0],
+                output=None,
+                order=0,
+                mode="nearest",
+                cval=0.0,
+                prefilter=True,
+            )
         image = cropToShape(zimage, image.shape)
 
         new_list.append(image)
@@ -114,6 +129,7 @@ _randomFlip_transform_list = [
     # lambda a: np.flip(a, 0),
     lambda a: np.flip(a, 1),
 ]
+
 
 def randomFlip(image_list, transform_bits=None):
     if transform_bits is None:
@@ -146,8 +162,16 @@ def randomSpin(image_list, angle=None, range_tup=None, axes=(0, 1)):
         # assert image.shape[-1] in {1, 3, 4}, repr(image.shape)
 
         image = scipy.ndimage.interpolation.rotate(
-                image, angle, axes=axes, reshape=False,
-                output=None, order=0, mode='nearest', cval=0.0, prefilter=True)
+            image,
+            angle,
+            axes=axes,
+            reshape=False,
+            output=None,
+            order=0,
+            mode="nearest",
+            cval=0.0,
+            prefilter=True,
+        )
 
         new_list.append(image)
 
@@ -156,7 +180,9 @@ def randomSpin(image_list, angle=None, range_tup=None, axes=(0, 1)):
 
 def randomNoise(image_list, noise_min=-0.1, noise_max=0.1):
     noise = np.zeros_like(image_list[0])
-    noise += (noise_max - noise_min) * np.random.random_sample(image_list[0].shape) + noise_min
+    noise += (noise_max - noise_min) * np.random.random_sample(
+        image_list[0].shape
+    ) + noise_min
     noise *= 5
     noise = scipy.ndimage.filters.gaussian_filter(noise, 3)
     # noise += (noise_max - noise_min) * np.random.random_sample(image_hsv.shape) + noise_min
@@ -170,10 +196,18 @@ def randomNoise(image_list, noise_min=-0.1, noise_max=0.1):
     return new_list
 
 
-def randomHsvShift(image_list, h=None, s=None, v=None,
-                   h_min=-0.1, h_max=0.1,
-                   s_min=0.5, s_max=2.0,
-                   v_min=0.5, v_max=2.0):
+def randomHsvShift(
+    image_list,
+    h=None,
+    s=None,
+    v=None,
+    h_min=-0.1,
+    h_max=0.1,
+    s_min=0.5,
+    s_max=2.0,
+    v_min=0.5,
+    v_max=2.0,
+):
     if h is None:
         h = h_min + (h_max - h_min) * random.random()
     if s is None:
@@ -185,9 +219,9 @@ def randomHsvShift(image_list, h=None, s=None, v=None,
     for image_hsv in image_list:
         # assert image_hsv.shape[-1] == 3, repr(image_hsv.shape)
 
-        image_hsv[:,:,0::3] += h
-        image_hsv[:,:,1::3] = image_hsv[:,:,1::3] ** s
-        image_hsv[:,:,2::3] = image_hsv[:,:,2::3] ** v
+        image_hsv[:, :, 0::3] += h
+        image_hsv[:, :, 1::3] = image_hsv[:, :, 1::3] ** s
+        image_hsv[:, :, 2::3] = image_hsv[:, :, 2::3] ** v
 
         new_list.append(image_hsv)
 
@@ -200,8 +234,8 @@ def clampHsv(image_list):
         image_hsv = image_hsv.clone()
 
         # Hue wraps around
-        image_hsv[:,:,0][image_hsv[:,:,0] > 1] -= 1
-        image_hsv[:,:,0][image_hsv[:,:,0] < 0] += 1
+        image_hsv[:, :, 0][image_hsv[:, :, 0] > 1] -= 1
+        image_hsv[:, :, 0][image_hsv[:, :, 0] < 0] += 1
 
         # Everything else clamps between 0 and 1
         image_hsv[image_hsv > 1] = 1
@@ -230,8 +264,6 @@ def clampHsv(image_list):
 #     ], device=input.device, dtype=torch.float32)
 #
 #     return th_affine3d(input, matrix)
-
-
 
 
 # following from https://github.com/ncullen93/torchsample/blob/master/torchsample/utils.py
