@@ -1423,7 +1423,7 @@ out[i][j][k] = input[index[i][j][k]][j][k]  # if dim == 0
 out[i][j][k] = input[i][index[i][j][k]][k]  # if dim == 1
 out[i][j][k] = input[i][j][index[i][j][k]]  # if dim == 2
 
-input and index must have the same number of dimensions. It is also required that index.size(d)<= input.size(d)for all dimensions d != dim. out will have the same shape as index. Note that input and index do not broadcast against each other.
+input and index must have the same number of dimensions. It is also required that index.size(d) <= input.size(d) for all dimensions d != dim. out will have the same shape as index. Note that input and index do not broadcast against each other.
 
 Parameters
 input (Tensor)– the source tensor
@@ -1440,6 +1440,17 @@ out (Tensor, optional)– the destination tensor
 >>> torch.gather(t, 1, torch.tensor([[0, 0], [1, 0]]))
 tensor([[ 1,  1],
         [ 4,  3]])
+
+# # 原始索引
+# [
+#     [(0, 0), (0, 1)],
+#     [(1, 0), (1, 1)]
+# ]
+# # 替换 dim=1 之后的索引
+# [
+#     [(0, 0), (0, 0)],
+#     [(1, 1), (1, 0)]
+# ]
 
 ```
 
@@ -1465,13 +1476,48 @@ dim (int)– the index at which to insert the singleton dimension
 """
 
 >>> x = torch.tensor([1, 2, 3, 4])
->>> torch.unsqueeze(x, 0)
-tensor([[ 1,  2,  3,  4]])
->>> torch.unsqueeze(x, 1)
-tensor([[ 1],
-        [ 2],
-        [ 3],
-        [ 4]])
+>>> x
+tensor([1, 2, 3, 4])
+>>> x.size()
+torch.Size([4])
+>>> x.stride()
+(1,)
+>>> u0 = torch.unsqueeze(x, 0)
+>>> u0
+tensor([[1, 2, 3, 4]])
+>>> u0.size()
+torch.Size([1, 4])
+>>> u0.stride()
+(4, 1)
+>>> u1 = torch.unsqueeze(x, 1)
+>>> u1.size()
+torch.Size([4, 1])
+>>> u1.stride()
+(1, 1)
+>>>
+
+>>> x = torch.arange(24, dtype=torch.int32).reshape(2, 3, 4)
+>>> x.size()
+torch.Size([2, 3, 4])
+>>> x.stride()
+(12, 4, 1)
+>>> u0 = torch.unsqueeze(x, 0)
+>>> u0.size()
+torch.Size([1, 2, 3, 4])
+>>> u0.stride()
+(24, 12, 4, 1)
+>>> u1 = torch.unsqueeze(x, 1)
+>>> u1.size()
+torch.Size([2, 1, 3, 4])
+>>> u1.stride()
+(12, 12, 4, 1)
+>>> u2 = torch.unsqueeze(x, 2)
+>>> u2.size()
+torch.Size([2, 3, 1, 4])
+>>> u3 = torch.unsqueeze(x, 3)
+>>> u3.size()
+torch.Size([2, 3, 4, 1])
+>>>
 
 ```
 
