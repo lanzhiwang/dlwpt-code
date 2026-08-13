@@ -1,8 +1,6 @@
 # Getting Started with Fully Sharded Data Parallel (FSDP2)
 完全分片数据并行 (FSDP2) 入门
 
-* https://docs.pytorch.org/tutorials/intermediate/FSDP_tutorial.html
-
 -----------------------------------------------------------------------------------------
 
 Q: 假设你是一位精通 LLM 和 PyTorch 的高级研究人员, 我查看了 PyTorch Distributed 的相关文档, 知道当您的模型无法在一个 GPU 上安装时, 请使 `FullyShardedDataParallel(FSDP2)`.
