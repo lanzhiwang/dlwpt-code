@@ -284,6 +284,363 @@ class SimpleLLM(nn.Module):
             x = layer(x)
         return self.head(x)
 ```
+请使用 PyTorch 基本的 API 模拟说明并行过程中前向传播的整个过程, 说明数据如何流动? 不要使用类似 `torch.distributed.tensor.parallel` 模块, 这样更能说明整个并行过程, 理解其基本原理.
+
+为了深入理解 2D 并行(TP + FSDP2)的底层物理机制, 我们脱离 `torch.distributed.tensor.parallel` 或 `fully_shard` 等高阶抽象封装, 直接使用 PyTorch 底层分布式通信原语(`dist.all_gather_into_tensor`、`dist.all_reduce`)与基础张量操作来重构和模拟前向传播过程.
+
+通过手写底层原语, 我们可以清晰地看到:
+
+1. FSDP2 的本质: 在前向计算前用 `dist.all_gather_into_tensor` 在 DP 组内拉取属于当前 TP Rank 的全量权重, 计算完后立即 `del` 释放临时权重(显存回收).
+2. TP 的本质: 在 TP 组内按通道(Out Dim / In Dim)切分矩阵乘法, 并在行切分(Rowwise)后使用 `dist.all_reduce(ReduceOp.SUM)` 规约部分和(Partial Sum).
+
+---
+
+### 一、通信组(Process Groups)的底层划分
+
+在 8 卡机器(DP=4, TP=2)上, 我们首先需要手写代码建立两组底层的通信组:
+
+```python
+# 网格矩阵 (DP Size=4, TP Size=2):
+# DP 组 0 (TP Rank 0/1): GPU [0, 1]
+# DP 组 1 (TP Rank 0/1): GPU [2, 3]
+# DP 组 2 (TP Rank 0/1): GPU [4, 5]
+# DP 组 3 (TP Rank 0/1): GPU [6, 7]
+
+# 1. 创建 TP 组 (节点内 2 卡互联, 用于 AllReduce 激活值):
+# [0, 1], [2, 3], [4, 5], [6, 7]
+
+# 2. 创建 DP 组 (跨组 4 卡互联, 用于 FSDP2 AllGather 权重):
+# [0, 2, 4, 6] (TP Rank 0 的 FSDP 组)
+# [1, 3, 5, 7] (TP Rank 1 的 FSDP 组)
+```
+
+---
+
+### 二、完整低阶原语模拟脚本 (`manual_2d_parallel.py`)
+
+以下是完全使用 PyTorch 基本 API 模拟前向传播的完整可运行代码:
+
+```python
+import os
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.distributed as dist
+
+# -------------------------------------------------------------
+# 1. 使用低阶原语手写 2D 并行(TP + FSDP2)Transformer Block
+# -------------------------------------------------------------
+class Manual2DTransformerBlock(nn.Module):
+    def __init__(self, dim, tp_group, dp_group, tp_size=2, dp_size=4):
+        super().__init__()
+        self.dim = dim
+        self.tp_group = tp_group
+        self.dp_group = dp_group
+        self.tp_size = tp_size
+        self.dp_size = dp_size
+
+        # ---------------------------------------------------------
+        # Linear1 (Colwise Parallel + FSDP2)
+        # 逻辑全量权重形状: [8192, 2048]
+        # 1. TP 切分 (Colwise): 沿 Out 维度切 2 份 -> 每个 TP Rank 负责 [4096, 2048]
+        # 2. FSDP2 切分: 沿 Out 维度切 4 份 -> 本 GPU 真正保存的碎片为 [1024, 2048]
+        # ---------------------------------------------------------
+        self.tp_out_dim1 = (dim * 4) // tp_size             # 4096
+        self.fsdp_shard_dim1 = self.tp_out_dim1 // dp_size # 1024
+
+        # 模拟常驻 GPU 显存的权重碎片 (Parameter Shard)
+        self.linear1_weight_shard = nn.Parameter(
+            torch.randn(self.fsdp_shard_dim1, dim) / (dim ** 0.5)
+        )
+
+        # ---------------------------------------------------------
+        # Linear2 (Rowwise Parallel + FSDP2)
+        # 逻辑全量权重形状: [2048, 8192]
+        # 1. TP 切分 (Rowwise): 沿 In 维度切 2 份 -> 每个 TP Rank 负责 [2048, 4096]
+        # 2. FSDP2 切分: 沿 Out 维度切 4 份 -> 本 GPU 真正保存的碎片为 [512, 4096]
+        # ---------------------------------------------------------
+        self.tp_in_dim2 = (dim * 4) // tp_size              # 4096
+        self.fsdp_shard_dim2 = dim // dp_size               # 512
+
+        self.linear2_weight_shard = nn.Parameter(
+            torch.randn(self.fsdp_shard_dim2, self.tp_in_dim2) / (self.tp_in_dim2 ** 0.5)
+        )
+
+    def forward(self, x):
+        # 输入 x 形状: [Batch, SeqLen, Dim] (例如 [2, 16, 2048])
+
+        # =========================================================
+        # 步骤 1: Linear1 前向计算 (Colwise TP + FSDP2)
+        # =========================================================
+        # [FSDP2 原理展示]: 在 DP 组内 AllGather 拼凑出属于本 TP Rank 的全量权重
+        # 输入分片: [1024, 2048] (来自 4 张 DP 卡) -> 收集后形状: [4096, 2048]
+        full_linear1_weight = torch.empty(
+            self.tp_out_dim1, self.dim, device=x.device, dtype=x.dtype
+        )
+        dist.all_gather_into_tensor(
+            full_linear1_weight, self.linear1_weight_shard, group=self.dp_group
+        )
+
+        # [TP 原理展示]: 本地矩阵乘法 x @ W1^T -> [B, L, 4096]
+        # TP Rank 0 算前 4096 个通道特征, TP Rank 1 算后 4096 个通道特征 (互不干扰, 无需通信)
+        h1 = F.linear(x, full_linear1_weight)
+
+        # [FSDP2 原理展示]: 显存释放! 计算完立即删除拼凑的临时全量权重
+        del full_linear1_weight
+
+        # 本地逐元素激活 GELU
+        a1 = F.gelu(h1)  # 形状: [B, L, 4096]
+
+        # =========================================================
+        # 步骤 2: Linear2 前向计算 (Rowwise TP + FSDP2)
+        # =========================================================
+        # [FSDP2 原理展示]: 在 DP 组内 AllGather 拼凑出属于本 TP Rank 的 Rowwise 权重
+        # 输入分片: [512, 4096] -> 收集后形状: [2048, 4096]
+        full_linear2_weight = torch.empty(
+            self.dim, self.tp_in_dim2, device=x.device, dtype=x.dtype
+        )
+        dist.all_gather_into_tensor(
+            full_linear2_weight, self.linear2_weight_shard, group=self.dp_group
+        )
+
+        # [TP 原理展示]: 本地矩阵乘法 a1 @ W2^T -> [B, L, 2048]
+        # 注意: 此处计算出的只是 Partial Sum (部分和)
+        partial_y = F.linear(a1, full_linear2_weight)
+
+        # [FSDP2 原理展示]: 显存释放
+        del full_linear2_weight
+
+        # [TP 原理展示]: 在 TP 组内规约求和 (AllReduce Sum)
+        # TP Rank 0 的 Partial Sum + TP Rank 1 的 Partial Sum = 完整的输出 Y
+        dist.all_reduce(partial_y, op=dist.ReduceOp.SUM, group=self.tp_group)
+        y = partial_y  # 形状: [B, L, 2048]
+
+        # =========================================================
+        # 步骤 3: 残差连接
+        # =========================================================
+        out = x + y  # 形状: [B, L, 2048]
+        return out
+
+
+# -------------------------------------------------------------
+# 2. 使用低阶原语手写 SimpleLLM
+# -------------------------------------------------------------
+class Manual2DSimpleLLM(nn.Module):
+    def __init__(self, vocab_size, dim, num_layers, tp_group, dp_group):
+        super().__init__()
+        self.dp_group = dp_group
+
+        # Embedding: 采用 FSDP2 分片 (按 DP=4 切分)
+        self.embed_shard_size = vocab_size // 4  # 2500
+        self.embed_weight_shard = nn.Parameter(
+            torch.randn(self.embed_shard_size, dim)
+        )
+
+        # Layers
+        self.layers = nn.ModuleList([
+            Manual2DTransformerBlock(dim, tp_group, dp_group)
+            for _ in range(num_layers)
+        ])
+
+        # Head: 采用 Colwise TP (5000) + FSDP2 (按 DP=4 切分 -> 1250)
+        self.head_shard_size = (vocab_size // 2) // 4  # 1250
+        self.head_weight_shard = nn.Parameter(
+            torch.randn(self.head_shard_size, dim)
+        )
+
+    def forward(self, x_tokens):
+        # 1. Embedding 前向: FSDP2 AllGather 还原 Embedding 矩阵
+        full_embed_weight = torch.empty(
+            10000, 2048, device=x_tokens.device, dtype=torch.float32
+        )
+        dist.all_gather_into_tensor(
+            full_embed_weight, self.embed_weight_shard, group=self.dp_group
+        )
+        x = F.embedding(x_tokens, full_embed_weight)
+        del full_embed_weight  # 立即释放
+
+        # 2. Transformer Blocks 前向
+        for layer in self.layers:
+            x = layer(x)
+
+        # 3. Head 前向: FSDP2 AllGather 还原 Colwise TP Head 矩阵
+        full_head_tp_weight = torch.empty(
+            5000, 2048, device=x_tokens.device, dtype=x.dtype
+        )
+        dist.all_gather_into_tensor(
+            full_head_tp_weight, self.head_weight_shard, group=self.dp_group
+        )
+        logits = F.linear(x, full_head_tp_weight)  # [B, L, 5000]
+        del full_head_tp_weight  # 立即释放
+
+        return logits
+
+
+# -------------------------------------------------------------
+# 3. 运行与验证主程序
+# -------------------------------------------------------------
+def main():
+    dist.init_process_group("nccl")
+    rank = int(os.environ["RANK"])
+    local_rank = int(os.environ["LOCAL_RANK"])
+    torch.cuda.set_device(local_rank)
+    device = torch.device(f"cuda:{local_rank}")
+
+    tp_size = 2
+    dp_size = 4
+
+    # ---------------------------------------------------------
+    # 手动建立通信组网格
+    # ---------------------------------------------------------
+    tp_group = None
+    dp_group = None
+
+    # 创建 4 个 TP 组: [0, 1], [2, 3], [4, 5], [6, 7]
+    for i in range(dp_size):
+        ranks = [i * tp_size + j for j in range(tp_size)]
+        group = dist.new_group(ranks)
+        if rank in ranks:
+            tp_group = group
+
+    # 创建 2 个 DP 组: [0, 2, 4, 6], [1, 3, 5, 7]
+    for j in range(tp_size):
+        ranks = [i * tp_size + j for i in range(dp_size)]
+        group = dist.new_group(ranks)
+        if rank in ranks:
+            dp_group = group
+
+    # ---------------------------------------------------------
+    # 实例化模型与模拟输入
+    # ---------------------------------------------------------
+    model = Manual2DSimpleLLM(
+        vocab_size=10000, dim=2048, num_layers=4,
+        tp_group=tp_group, dp_group=dp_group
+    ).to(device)
+
+    # 模拟输入数据: 同一 TP 组(如 GPU 0 和 1)输入相同, 不同 DP 组输入不同
+    dp_rank = rank // tp_size
+    torch.manual_seed(42 + dp_rank)
+    dummy_input = torch.randint(0, 10000, (2, 16), device=device)
+
+    # 执行前向传播
+    logits = model(dummy_input)
+
+    print(f"[Rank {rank}] 前向传播成功! 输出 Logits 形状: {logits.shape}")
+
+    dist.barrier()
+    dist.destroy_process_group()
+
+
+if __name__ == "__main__":
+    main()
+```
+
+---
+
+### 三、运行方法
+
+使用 `torchrun` 启动 8 进程运行脚本:
+
+```bash
+torchrun --nproc_per_node=8 manual_2d_parallel.py
+```
+
+#### 输出打印:
+```text
+[Rank 0] 前向传播成功! 输出 Logits 形状: torch.Size([2, 16, 5000])
+[Rank 1] 前向传播成功! 输出 Logits 形状: torch.Size([2, 16, 5000])
+...
+[Rank 7] 前向传播成功! 输出 Logits 形状: torch.Size([2, 16, 5000])
+```
+
+---
+
+### 四、核心数据流动与原理深度剖析
+
+结合上述底层原语代码, 我们可以将前向传播中单个 Transformer Block 内部的数据流动精简总结为以下 4 步:
+
+```
+                    ┌────────────────────────────────────────────────────────┐
+                    │                      Input X [2, 16, 2048]             │
+                    └───────────────────────────┬────────────────────────────┘
+                                                │
+      ┌─────────────────────────────────────────┴─────────────────────────────────────────┐
+      │                                                                                   │
+      ▼                                                                                   ▼
+[GPU 0 (TP Rank 0, DP Rank 0)]                                       [GPU 1 (TP Rank 1, DP Rank 0)]
+常驻分片: W1_shard [1024, 2048]                                       常驻分片: W1_shard [1024, 2048]
+      │                                                                                   │
+      │ 1. dist.all_gather_into_tensor(dp_group)                                          │ 1. dist.all_gather_into_tensor(dp_group)
+      ▼                                                                                   ▼
+重构权: W1_full [4096, 2048]                                          重构权: W1_full [4096, 2048]
+      │                                                                                   │
+      │ 2. F.linear(X, W1_full)                                                           │ 2. F.linear(X, W1_full)
+      ▼                                                                                   ▼
+激活值: h1 [2, 16, 4096]                                              激活值: h1 [2, 16, 4096]
+      │                                                                                   │
+      │ 3. del W1_full (释放显存)                                                          │ 3. del W1_full (释放显存)
+      ▼                                                                                   ▼
+激活值: a1 = GELU(h1) [2, 16, 4096]                                   激活值: a1 = GELU(h1) [2, 16, 4096]
+      │                                                                                   │
+      │ 4. dist.all_gather_into_tensor(dp_group)                                          │ 4. dist.all_gather_into_tensor(dp_group)
+      ▼                                                                                   ▼
+重构权: W2_full [2048, 4096]                                          重构权: W2_full [2048, 4096]
+      │                                                                                   │
+      │ 5. F.linear(a1, W2_full)                                                          │ 5. F.linear(a1, W2_full)
+      ▼                                                                                   ▼
+部分和: partial_y [2, 16, 2048]                                       部分和: partial_y [2, 16, 2048]
+      │                                                                                   │
+      └─────────────────────────────────────────┬─────────────────────────────────────────┘
+                                                │
+                                                ▼ 6. dist.all_reduce(op=SUM, tp_group)
+                                                │    (TP 组内规约求和)
+                                                ▼
+                                    输出 Y = partial_y_0 + partial_y_1
+                                         形状: [2, 16, 2048]
+```
+
+#### 关键原语对齐解说:
+1. `dist.all_gather_into_tensor(full_weight, weight_shard, group=dp_group)`:
+   * 作用: 这就是 FSDP2 前向的核心动作. 将分散在 DP 组 4 张卡上的小分片拼成属于当前 TP 节点所需的完整权重.
+   * 通信维度: 沿着 DP 组 (`[0, 2, 4, 6]`) 进行.
+2. `del full_weight`:
+   * 作用: 显式调用 Python 垃圾回收机制, 释放临时重构的全量权重. 这是 FSDP2 降低显存峰值的关键所在.
+3. `dist.all_reduce(partial_y, op=dist.ReduceOp.SUM, group=tp_group)`:
+   * 作用: 这就是 TP 行切分(Rowwise)的核心动作. 把 TP Rank 0 和 TP Rank 1 计算出来的 Partial Sum 规约相加, 恢复完整维度.
+   * 通信维度: 沿着 TP 组 (`[0, 1]`) 进行.
+
+
+
+
+
+-----------------------------------------------------------------------------------------
+
+Q: 假设我现在有 1 台机器, 机器上有 8 张 GPU, 现在我想模拟`2D 并行(TP + FSDP2)`, 模型如下代码所示:
+```python
+class TransformerBlock(nn.Module):
+    def __init__(self, dim: int):
+        super().__init__()
+        self.linear1 = nn.Linear(dim, dim * 4)
+        self.act = nn.GELU()
+        self.linear2 = nn.Linear(dim * 4, dim)
+
+    def forward(self, x):
+        return x + self.linear2(self.act(self.linear1(x)))
+
+
+class SimpleLLM(nn.Module):
+    def __init__(self, vocab_size=10000, dim=2048, num_layers=4):
+        super().__init__()
+        self.embed = nn.Embedding(vocab_size, dim)
+        self.layers = nn.ModuleList([TransformerBlock(dim) for _ in range(num_layers)])
+        self.head = nn.Linear(dim, vocab_size)
+
+    def forward(self, x):
+        x = self.embed(x)
+        for layer in self.layers:
+            x = layer(x)
+        return self.head(x)
+```
 请详细说明并行过程中前向传播的整个过程, 说明数据如何流动?
 
 在 2D 混合并行(TP + FSDP2) 的架构下, 前向传播(Forward Pass)交织着数据分片、权重的按需拉取(FSDP2 AllGather) 以及张量并行的分布式计算与规约(TP AllReduce).
@@ -314,7 +671,7 @@ class SimpleLLM(nn.Module):
 ```
 
 #### 步骤 1: Embedding 层
-1. FSDP2 AllGather: GPU 0(与 2, 4, 6)触发 FSDP2 通信, 从同组卡拉取参数, 拼出属于 TP Rank 0 的完整 Embedding 权重；GPU 1(与 3, 5, 7)同步拼出 TP Rank 1 的权重.
+1. FSDP2 AllGather: GPU 0(与 2, 4, 6)触发 FSDP2 通信, 从同组卡拉取参数, 拼出属于 TP Rank 0 的完整 Embedding 权重; GPU 1(与 3, 5, 7)同步拼出 TP Rank 1 的权重.
 2. 本地计算: 输入 Tokens $X \in [B, L]$ 查表得到隐藏状态 $X_{\text{emb}} \in [B, L, 2048]$.
 3. FSDP2 释放: 计算完毕, 立即释放临时 AllGather 出来的 Embedding 权重, 只留各自的 $\frac{1}{4}$ 分片.
 4. 状态: GPU 0 和 GPU 1 此时持有完全相同的激活张量 $X_{\text{emb}}$.
@@ -391,7 +748,7 @@ class SimpleLLM(nn.Module):
 | Linear2 后   | $Y = Y^{(0)} + Y^{(1)}$                          | $Y = Y^{(0)} + Y^{(1)}$                          | TP AllReduce (Sum)(仅 GPU 0 和 1 节点内 NVLink 规约) |
 
 一句话总结 2D 并行前向传播的精髓:
-> FSDP2 在 DP 维度上"按需拉取/用完即释放"模型权重, 解决了显存存不下的问题；TP 在 TP 维度上"切分矩阵计算/每层规约激活", 解决了单卡计算慢和激活显存大的问题. 两者在 DeviceMesh 的编排下完美交错重叠运行.
+> FSDP2 在 DP 维度上"按需拉取/用完即释放"模型权重, 解决了显存存不下的问题; TP 在 TP 维度上"切分矩阵计算/每层规约激活", 解决了单卡计算慢和激活显存大的问题. 两者在 DeviceMesh 的编排下完美交错重叠运行.
 
 
 

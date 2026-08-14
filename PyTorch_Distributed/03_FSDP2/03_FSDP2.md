@@ -1205,6 +1205,343 @@ export GLOO_SOCKET_IFNAME=eth0
 
 -----------------------------------------------------------------------------------------
 
+Q: 假设我现在有 1 台机器, 机器上有 8 张 GPU, 现在我想模拟 `FSDP2`, 模型如下代码所示:
+```python
+class TransformerBlock(nn.Module):
+    def __init__(self, dim: int):
+        super().__init__()
+        self.linear1 = nn.Linear(dim, dim * 4)
+        self.act = nn.GELU()
+        self.linear2 = nn.Linear(dim * 4, dim)
+
+    def forward(self, x):
+        return x + self.linear2(self.act(self.linear1(x)))
+
+
+class SimpleLLM(nn.Module):
+    def __init__(self, vocab_size=10000, dim=2048, num_layers=4):
+        super().__init__()
+        self.embed = nn.Embedding(vocab_size, dim)
+        self.layers = nn.ModuleList([TransformerBlock(dim) for _ in range(num_layers)])
+        self.head = nn.Linear(dim, vocab_size)
+
+    def forward(self, x):
+        x = self.embed(x)
+        for layer in self.layers:
+            x = layer(x)
+        return self.head(x)
+```
+1、脱离 `torch.distributed.` 等高阶抽象封装, 直接使用 PyTorch 底层分布式通信原语(`dist.all_gather_into_tensor`、`dist.all_reduce`)与基础张量操作来模拟前向传播过程.
+2、详细说明显卡如何形成通信组
+3、在代码中添加详细注释, 说明代码和 API 的含义和作用
+4、在注释中说明每个步骤的操作后张量的形状
+5、从基本的纯文本开始说明如何将文本转成矩阵, 如何运行脚本
+6、输出完整可运行的代码, 并详细说明代码运行方式
+
+为了深入理解 FSDP2 (Fully Sharded Data Parallel 2) 的核心工作机制, 我们将脱离 `torch.distributed.fsdp` 等高层黑盒封装, 直接使用底层分布式通信原语(如 `dist.all_gather_into_tensor`)手动构建一个支持 8 卡分布式显存切分的 `SimpleLLM`.
+
+---
+
+### 一、核心概念梳理
+
+#### 1. 文本如何转为矩阵(Text to Matrix)与分布式数据划分
+
+1. 分词(Tokenization): 将自然语言纯文本(如 `"Hello World"`)按照词表(Vocabulary)映射为整型索引列表(Token IDs), 例如 `[101, 7592, 2088, 102]`.
+2. 张量化与对齐(Padding / Truncation): 将多个句子的 ID 填充/截断到固定长度 `seq_len`, 组合成 Batch, 得到全局输入张量, 形状为 `[global_batch_size, seq_len]`.
+3. 数据并行切分(Data Sharding): 在 8 卡环境下, 每个 GPU 只负责处理全局 Batch 的一部分. 若 `global_batch_size = 16`, 则每个 GPU(Rank)分配到的局部张量形状为 `[local_batch_size, seq_len] = [2, seq_len]`.
+
+#### 2. 显卡通信组(Process Group)的建立过程
+
+* 物理连接: 单机 8 卡通常通过 NVLink 或 PCIe 总线互联.
+* 环境变量引导: `torchrun` 启动 8 个独立的 Python 进程, 并自动为每个进程注入环境变量:
+  * `RANK`(当前进程在全局中的唯一编号 `0~7`)
+  * `LOCAL_RANK`(当前进程在本地机器对应的 GPU 编号 `0~7`)
+  * `WORLD_SIZE`(总进程数 `8`)
+  * `MASTER_ADDR` / `MASTER_PORT`(用于初始网络握手的 TCP 主节点地址)
+* 握手与建组: 各进程调用 `dist.init_process_group(backend='nccl')`, 通过 TCP 进行 rendezvous(集合点握手), 随后 NCCL 初始化每张显卡之间的通信通道(构建环形 Ring 或树形 Tree 拓扑).
+
+#### 3. FSDP2 的底层精髓
+
+* 静态存储态(Sharded): 每个权重矩阵 $W \in \mathbb{R}^{O \times I}$ 在初始化时沿第 0 维被均分成 8 份, 每张卡仅常驻保存 $\frac{1}{8}$ 参数(即 `[O/8, I]`), 显存占用仅为原来的 $\frac{1}{8}$.
+* 动态计算态(Gather & Discard):
+  1. 在前向传播到某一层之前, 使用 `dist.all_gather_into_tensor` 将 8 张卡的局部参数拼接恢复为完整权重 `[O, I]`.
+  2. 执行矩阵乘法 `x @ W.T`.
+  3. 立即释放(`del`)完整权重, 显存回落到仅保留该层输出激活值的状态.
+
+---
+
+### 二、完整可运行代码
+
+新建文件 `fsdp2_simulation.py`, 完整代码如下:
+
+```python
+# fsdp2_simulation.py
+```
+
+---
+
+### 三、张量流动与形状演变全景表(以单卡 Rank 0 为例)
+
+假设配置为: `world_size = 8`, `local_batch_size = 2`, `seq_len = 16`, `dim = 2048`, `vocab_size = 10240`:
+
+| 步骤                | 操作类型       | 涉及的底层原语 / 算子         | 输入张量及形状                      | 输出张量及形状                | 说明与显存状态                            |
+| :------------------ | :------------- | :---------------------------- | :---------------------------------- | :---------------------------- | :---------------------------------------- |
+| 0. 静态存储         | 模型参数驻留   | `nn.Parameter`                | 无                                  | `sharded_weight`              | 每张卡仅保存 `[O/8, I]`, 显存常驻仅 $1/8$ |
+| 1. 文本输入         | Data Sharding  | Tokenizer 切片                | 纯文本 List (2 句)                  | `local_input_ids`: `[2, 16]`  | 8 张卡各处理全局 16 句中的 2 句           |
+| 2. 词嵌入           | All-Gather     | `dist.all_gather_into_tensor` | `sharded_embed`: `[1280, 2048]`     | `full_embed`: `[10240, 2048]` | 临时申请全量词表显存                      |
+|                     | Embedding 查表 | `F.embedding`                 | `[2, 16]` + `[10240, 2048]`         | `x`: `[2, 16, 2048]`          | 查表完成                                  |
+|                     | 显存释放       | `del full_embed`              | `full_embed`                        | `None`                        | 释放全量词表显存                          |
+| 3. Block-0: Linear1 | All-Gather     | `dist.all_gather_into_tensor` | `sharded_w1`: `[1024, 2048]`        | `full_w1`: `[8192, 2048]`     | 临时聚合 Linear1 全量权重                 |
+|                     | 矩阵乘法       | `F.linear`                    | `[2, 16, 2048]` @ `[8192, 2048].T`  | `h1`: `[2, 16, 8192]`         | 升维映射                                  |
+|                     | 显存释放       | `del full_w1`                 | `full_w1`                           | `None`                        | 释放 Linear1 全量权重                     |
+| 4. Block-0: GELU    | 逐元素激活     | `nn.GELU()`                   | `h1`: `[2, 16, 8192]`               | `h2`: `[2, 16, 8192]`         | 本地计算, 无通信                          |
+| 5. Block-0: Linear2 | All-Gather     | `dist.all_gather_into_tensor` | `sharded_w2`: `[256, 8192]`         | `full_w2`: `[2048, 8192]`     | 临时聚合 Linear2 全量权重                 |
+|                     | 矩阵乘法       | `F.linear`                    | `[2, 16, 8192]` @ `[2048, 8192].T`  | `h3`: `[2, 16, 2048]`         | 降维映射回模型维度                        |
+|                     | 显存释放       | `del full_w2`                 | `full_w2`                           | `None`                        | 释放 Linear2 全量权重                     |
+|                     | 残差相加       | `+` (Residual)                | `x + h3`                            | `x`: `[2, 16, 2048]`          | 完成一层 Block 计算                       |
+| 6. 循环 Block 1~3   | 重复步骤 3~5   | -                             | -                                   | `x`: `[2, 16, 2048]`          | 显存峰值始终只包含当前运行层的临时权重    |
+| 7. Head 输出层      | All-Gather     | `dist.all_gather_into_tensor` | `sharded_head`: `[1280, 2048]`      | `full_head`: `[10240, 2048]`  | 临时聚合分类头权重                        |
+|                     | 最终投影       | `F.linear`                    | `[2, 16, 2048]` @ `[10240, 2048].T` | `logits`: `[2, 16, 10240]`    | 得到每个 Token 的词表打分                 |
+|                     | 显存释放       | `del full_head`               | `full_head`                         | `None`                        | 释放分类头全量权重                        |
+| 8. 全局 Loss 统计   | All-Reduce     | `dist.all_reduce`             | `local_loss`: 标量                  | `global_loss`: 标量           | 聚合全部 8 卡的 Loss 求和                 |
+
+---
+
+### 四、代码运行方式与环境要求
+
+#### 1. 运行环境依赖
+确保机器拥有 8 张 NVIDIA GPU, 并安装了支持 CUDA 的 PyTorch:
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cu121
+```
+
+#### 2. 使用 PyTorch 标准分布式启动器 `torchrun`
+在单机 8 卡机器上运行以下命令:
+
+```bash
+torchrun --nproc_per_node=8 fsdp2_simulation.py
+```
+
+参数解析:
+* `--nproc_per_node=8`: 指定在当前单台机器上派生(spawn)8 个独立的 Python 进程, 分别绑定编号为 `0` 到 `7` 的 GPU 显卡.
+* `torchrun` 会自动在底层配置好 `RANK`, `LOCAL_RANK`, `WORLD_SIZE`, `MASTER_ADDR`, `MASTER_PORT` 环境变量, 脚本中的 `dist.init_process_group` 会自动读取它们并完成组网.
+
+#### 3. 预期标准控制台输出
+```text
+======================================================================
+[NCCL 初始化完成] 总显卡数 (World Size): 8
+======================================================================
+[Rank 0] 静态常驻分片参数量: 22.02 M (仅占完整模型的 1/8)
+[Rank 1] 静态常驻分片参数量: 22.02 M (仅占完整模型的 1/8)
+...
+[Rank 7] 静态常驻分片参数量: 22.02 M (仅占完整模型的 1/8)
+
+[开始执行模拟 FSDP2 前向传播 (含 All-Gather 收集与释放)]...
+[Rank 0] 前向传播成功! 输出 Logits 形状: [2, 16, 10240] (设备: cuda:0)
+[Rank 1] 前向传播成功! 输出 Logits 形状: [2, 16, 10240] (设备: cuda:1)
+...
+[Rank 7] 前向传播成功! 输出 Logits 形状: [2, 16, 10240] (设备: cuda:7)
+
+[All-Reduce 通信成功] 全局平均损失 (Global Loss): 0.0012
+======================================================================
+```
+
+-----------------------------------------------------------------------------------------
+
+Q: 假设我现在有 2 台机器, 每台机器上有 8 张 GPU, 现在我想模拟 `FSDP2`, 模型如下代码所示:
+```python
+class TransformerBlock(nn.Module):
+    def __init__(self, dim: int):
+        super().__init__()
+        self.linear1 = nn.Linear(dim, dim * 4)
+        self.act = nn.GELU()
+        self.linear2 = nn.Linear(dim * 4, dim)
+
+    def forward(self, x):
+        return x + self.linear2(self.act(self.linear1(x)))
+
+
+class SimpleLLM(nn.Module):
+    def __init__(self, vocab_size=10000, dim=2048, num_layers=4):
+        super().__init__()
+        self.embed = nn.Embedding(vocab_size, dim)
+        self.layers = nn.ModuleList([TransformerBlock(dim) for _ in range(num_layers)])
+        self.head = nn.Linear(dim, vocab_size)
+
+    def forward(self, x):
+        x = self.embed(x)
+        for layer in self.layers:
+            x = layer(x)
+        return self.head(x)
+```
+1、脱离 `torch.distributed.` 等高阶抽象封装, 直接使用 PyTorch 底层分布式通信原语(`dist.all_gather_into_tensor`、`dist.all_reduce`)与基础张量操作来模拟前向传播过程.
+2、详细说明显卡如何形成通信组
+3、在代码中添加详细注释, 说明代码和 API 的含义和作用
+4、在注释中说明每个步骤的操作后张量的形状
+5、从基本的纯文本开始说明如何将文本转成矩阵, 如何运行脚本
+6、输出完整可运行的代码, 并详细说明代码运行方式
+
+在 2 台机器、每台 8 张 GPU(共 16 张 GPU, `World Size = 16`) 的多机分布式环境下, FSDP2 的核心目标依然是: 将模型参数沿第 0 维切分成 16 份分摊到所有显卡上, 在前向传播到达具体某一层时, 利用跨机/跨卡的底层通信原语聚合全量权重, 计算完成后立即销毁释放.
+
+下面将从文本向量化原理、多机通信组建立、底层原语实现、张量演变跟踪、多机启动实战 5 个维度展开完整解析与代码实现.
+
+---
+
+### 一、文本到张量(Text to Matrix)与多机数据划分
+
+```
+[原始文本 (32 条)]
+       │ 字符级/词表 Tokenizer (编码 + Padding)
+       ▼
+[全局输入矩阵] Shape: [Global_Batch=32, Seq_Len=16]
+       │
+       ├─ Node 0 (机1) Rank 0~7  ── 各取 2 行 ──> Local Batch Shape: [2, 16]
+       └─ Node 1 (机2) Rank 8~15 ── 各取 2 行 ──> Local Batch Shape: [2, 16]
+```
+
+1. 分词(Tokenization): 将输入文本序列(如 `"Prompt 0: Hello FSDP2..."`)中的字符/词元映射为词表中的整数 ID($0 \le \text{ID} < \text{vocab\_size}$).
+2. 对齐与矩阵化: 将不等长的序列通过截断或补零(Padding)规整为同一长度 `seq_len`, 形成二维整数矩阵 `[global_batch_size, seq_len]`.
+3. 多机数据并行切分(Multi-node Data Sharding):
+   * 全局总样本数 $\text{Global Batch} = 32$, 总 GPU 数 $\text{World Size} = 16$.
+   * 每张卡(无论是 Machine 1 上的 Rank 3 还是 Machine 2 上的 Rank 11)独立分配 $\text{Local Batch} = 32 / 16 = 2$ 行输入数据, 形状为 `[2, 16]`.
+
+---
+
+### 二、多机 16 卡显卡通信组(Process Group)原理解析
+
+在 2 机 16 卡环境中, 通信呈现分层拓扑结构(Hierarchical Topology):
+
+```
+========================= 机器 0 (Node 0, Master: 192.168.1.10) =========================
+GPU 0 (Rank 0) ── NVLink ── GPU 1 (Rank 1) ... GPU 7 (Rank 7)  [机内带宽: 900 GB/s]
+       │                                              │
+       └───────────────────────┬──────────────────────┘
+                               │ (InfiniBand / RoCE / 以太网, 带宽: 50~400 Gbps)
+========================= 机器 1 (Node 1, Worker: 192.168.1.11) =========================
+                               │
+       ┌───────────────────────┴──────────────────────┐
+       │                                              │
+GPU 0 (Rank 8) ── NVLink ── GPU 1 (Rank 9) ... GPU 7 (Rank 15) [机内带宽: 900 GB/s]
+========================================================================================
+```
+
+#### 1. 环境变量与编号规则
+* `WORLD_SIZE = 16`: 两台机器上的总 GPU 进程数.
+* `RANK`(全局编号 `0 ~ 15`):
+  * Node 0 上的 8 张卡分配 `RANK 0 ~ 7`;
+  * Node 1 上的 8 张卡分配 `RANK 8 ~ 15`.
+* `LOCAL_RANK`(物理设备编号 `0 ~ 7`): 每台机器内部映射到本地对应的物理显卡 `cuda:0 ~ cuda:7`.
+* `NODE_RANK`: 机器编号(Node 0 为 0, Node 1 为 1).
+* `MASTER_ADDR` / `MASTER_PORT`: Node 0 的 IP 地址和通信端口, 作为所有 16 个进程集中握手(Rendezvous)的中心.
+
+#### 2. NCCL 通信组建立流程
+1. TCP 集中握手: 两台机器上的 16 个 Python 进程通过 `MASTER_ADDR:MASTER_PORT` 的 TCP Store 进行握手, 确认 16 个成员全部在线.
+2. 硬件拓扑探测: NCCL 自动检测出机内有高速 NVLink, 跨机为 InfiniBand 网卡或 PCIe 以太网.
+3. 通信拓扑建环/建树(Ring / Tree): NCCL 构建出跨机、跨卡的高效通信环路(Ring All-Gather), 在执行 `dist.all_gather_into_tensor` 时, 数据以流水线方式在 16 张卡之间快速传递拼接.
+
+---
+
+### 三、完整可运行代码
+
+新建文件 `fsdp2_multi_node.py`:
+
+```python
+# fsdp2_multi_node.py
+```
+
+---
+
+### 四、16 卡张量流动与形状演变全景表(以任意 Rank 为例)
+
+配置参数: `World Size = 16`, `Local Batch = 2`, `Seq Len = 16`, `Dim = 2048`, `Vocab Size = 10240`.
+
+| 步骤              | 操作类型          | 涉及算子 / 原语               | 输入张量及形状                      | 输出张量及形状                | 显存生命周期与状态               |
+| :---------------- | :---------------- | :---------------------------- | :---------------------------------- | :---------------------------- | :------------------------------- |
+| 0. 静态常驻       | 参数切分存储      | `nn.Parameter`                | 无                                  | `sharded_weight`              | 每张卡常驻仅占 1/16 模型参数     |
+| 1. 输入处理       | 数据切分          | Tokenizer 切片                | 纯文本 List (2 句)                  | `local_input_ids`: `[2, 16]`  | 16 张卡各分配全局 32 句中的 2 句 |
+| 2. 词嵌入         | All-Gather (16卡) | `dist.all_gather_into_tensor` | `sharded_embed`: `[640, 2048]`      | `full_embed`: `[10240, 2048]` | 临时开辟全量词表显存             |
+|                   | Embedding 查表    | `F.embedding`                 | `[2, 16]` + `[10240, 2048]`         | `x`: `[2, 16, 2048]`          | 查表完成                         |
+|                   | 显存释放          | `del full_embed`              | `full_embed`                        | `None`                        | 立即释放全量词表显存             |
+| 3. Block: Linear1 | All-Gather (16卡) | `dist.all_gather_into_tensor` | `sharded_w1`: `[512, 2048]`         | `full_w1`: `[8192, 2048]`     | 跨机聚合 Linear1 权重            |
+|                   | 矩阵乘法          | `F.linear`                    | `[2, 16, 2048]` @ `[8192, 2048].T`  | `h1`: `[2, 16, 8192]`         | 升维变换                         |
+|                   | 显存释放          | `del full_w1`                 | `full_w1`                           | `None`                        | 立即释放 Linear1 权重            |
+| 4. Block: GELU    | 激活函数          | `nn.GELU()`                   | `h1`: `[2, 16, 8192]`               | `h2`: `[2, 16, 8192]`         | 单卡本地计算, 无网络通信         |
+| 5. Block: Linear2 | All-Gather (16卡) | `dist.all_gather_into_tensor` | `sharded_w2`: `[128, 8192]`         | `full_w2`: `[2048, 8192]`     | 跨机聚合 Linear2 权重            |
+|                   | 矩阵乘法          | `F.linear`                    | `[2, 16, 8192]` @ `[2048, 8192].T`  | `h3`: `[2, 16, 2048]`         | 降维还原回模型维度               |
+|                   | 显存释放          | `del full_w2`                 | `full_w2`                           | `None`                        | 立即释放 Linear2 权重            |
+|                   | 残差相加          | `+` (Residual)                | `x + h3`                            | `x`: `[2, 16, 2048]`          | 完成单层 Block 前向              |
+| 6. 堆叠循环       | 重复步骤 3~5      | -                             | -                                   | `x`: `[2, 16, 2048]`          | 遍历完 `num_layers=4` 层         |
+| 7. Head 输出      | All-Gather (16卡) | `dist.all_gather_into_tensor` | `sharded_head`: `[640, 2048]`       | `full_head`: `[10240, 2048]`  | 跨机聚合 Head 权重               |
+|                   | 最终投影          | `F.linear`                    | `[2, 16, 2048]` @ `[10240, 2048].T` | `logits`: `[2, 16, 10240]`    | 输出每个 Token 的词表打分        |
+|                   | 显存释放          | `del full_head`               | `full_head`                         | `None`                        | 立即释放 Head 权重               |
+| 8. 跨机 Loss 汇聚 | All-Reduce (16卡) | `dist.all_reduce`             | `local_loss`: 标量                  | `global_loss`: 标量           | 跨两台机器 16 卡 Loss 求和       |
+
+---
+
+### 五、多机环境配置与运行指南
+
+假设两台机器网络配置如下:
+* 机器 0(主节点 Node 0): 内网 IP 为 `192.168.1.10`
+* 机器 1(从节点 Node 1): 内网 IP 为 `192.168.1.11`
+* 保证两台机器之间端口 `29500` 互通无防火墙拦截.
+
+#### 1. 在机器 0(Node 0)上执行启动命令
+打开机器 0 的终端, 运行:
+```bash
+torchrun \
+    --nnodes=2 \
+    --nproc_per_node=8 \
+    --node_rank=0 \
+    --master_addr=192.168.1.10 \
+    --master_port=29500 \
+    fsdp2_multi_node.py
+```
+
+#### 2. 在机器 1(Node 1)上执行启动命令
+打开机器 1 的终端, 运行:
+```bash
+torchrun \
+    --nnodes=2 \
+    --nproc_per_node=8 \
+    --node_rank=1 \
+    --master_addr=192.168.1.10 \
+    --master_port=29500 \
+    fsdp2_multi_node.py
+```
+
+#### 3. 参数原理解析
+* `--nnodes=2`: 告诉 `torchrun` 整个集群共有 2 台机器参与计算.
+* `--nproc_per_node=8`: 每台机器生成 8 个进程(分别绑定本地 `cuda:0` 到 `cuda:7`).
+* `--node_rank=0` 与 `--node_rank=1`: 标识机器自身的节点编号. `torchrun` 会据此自动推导全局 `RANK`(Node 0 为 `0~7`, Node 1 为 `8~15`).
+* `--master_addr` / `--master_port`: 两台机器均指向 Node 0 的 IP 和端口, 以此建立多机 TCP Rendezvous 握手并初始化跨机 NCCL 通信.
+
+#### 4. 预期运行输出(Node 0 终端)
+```text
+================================================================================
+[多机通信组初始化完成] 总机器数: 2 | 每台 GPU: 8 | 总 World Size: 16
+================================================================================
+[Node 0 | Rank 00 | GPU 0] 静态常驻参数量: 11.01 M (仅占全局总参数 176.16M 的 1/16)
+[Node 0 | Rank 01 | GPU 1] 静态常驻参数量: 11.01 M (仅占全局总参数 176.16M 的 1/16)
+...
+[Node 1 | Rank 15 | GPU 7] 静态常驻参数量: 11.01 M (仅占全局总参数 176.16M 的 1/16)
+
+[开始执行 16 卡跨机前向计算 (逐层 All-Gather 动态加载与释放)]...
+[Node 0 | Rank 00] 前向完成! 输出 Logits 形状: [2, 16, 10240]
+[Node 0 | Rank 01] 前向完成! 输出 Logits 形状: [2, 16, 10240]
+...
+[Node 1 | Rank 15] 前向完成! 输出 Logits 形状: [2, 16, 10240]
+
+================================================================================
+[16 卡跨机 All-Reduce 成功] 全局平均损失 (Global Loss): 0.0006
+================================================================================
+```
+
+-----------------------------------------------------------------------------------------
+
+-----------------------------------------------------------------------------------------
+
+-----------------------------------------------------------------------------------------
+
 -----------------------------------------------------------------------------------------
 
 -----------------------------------------------------------------------------------------
